@@ -23,15 +23,20 @@ alone, never by the rows, the threads or @m@:
   added in split order ('combineSplits').
 
 So the variants for every @m@ give a row the same bits, and so do the
-variants that differ only in rows and threads.
+variants that differ only in rows and threads: 'gemvSpace' marks the pack
+width and the split as the axes that decide the order.
 -}
 module Test.FuryKernel.Gemv (
   GemvShape (..),
   GemvVariant (..),
   gemv,
+  gemvSpace,
+  gemvAxes,
+  gemvDivides,
 ) where
 
 import Control.Monad (forM, forM_, unless)
+import Data.Maybe (fromMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Text qualified as T
 import Data.Word (Word32)
@@ -42,6 +47,7 @@ import FuryKernel.IR (Name)
 import FuryKernel.Reduce (combineSplits)
 import FuryKernel.Target (Target, TargetCaps (..), targetCaps)
 import FuryKernel.Type (BF16)
+import FuryKernel.Variant (Axis (..), Point, Shape (..), Space (..), pointValue, shapeDim)
 import GHC.TypeNats (KnownNat)
 import Numeric.Natural (Natural)
 
@@ -64,6 +70,46 @@ data GemvVariant = GemvVariant
   -- ^ SIMD groups that share a row, each with its part of the packs.
   }
   deriving stock (Eq, Show)
+
+-- | The family's variant space on @t@, over these classes.
+gemvSpace :: forall t. (Target t) => [GemvShape] -> Space t
+gemvSpace shapes =
+  Space
+    { spaceFamily = "gemv"
+    , spaceAxes = gemvAxes
+    , spaceShapes = [Shape [("n", sh.outputs), ("k", sh.inputs), ("m", sh.batch)] | sh <- shapes]
+    , spaceBatch = ["m"]
+    , spaceDivides = \sh p -> gemvDivides @t (fromShape sh) (fromPoint p)
+    , spaceKernel = \name sh p -> gemv name (fromShape sh) (fromPoint p)
+    }
+ where
+  fromShape sh = GemvShape (dimOf "n" sh) (dimOf "k" sh) (dimOf "m" sh)
+  dimOf d = fromMaybe 0 . shapeDim d
+  fromPoint :: Point -> GemvVariant
+  fromPoint p = GemvVariant (axis "r" p) (axis "t" p) (axis "p" p) (axis "s" p)
+  axis a = fromMaybe 0 . pointValue a
+
+-- | Rows per SIMD group, threads, pack width and split; the last two order.
+gemvAxes :: [Axis]
+gemvAxes =
+  [ Axis "rows_per_simd" "r" [1, 2, 4, 8] False
+  , Axis "threads" "t" [32, 64, 128, 256, 512, 1024] False
+  , Axis "pack" "p" [4, 8, 16] True
+  , Axis "split_k" "s" [1, 2, 4, 8, 16] True
+  ]
+
+-- | Why a variant doesn't divide a shape on @t@.
+gemvDivides :: forall t. (Target t) => GemvShape -> GemvVariant -> [T.Text]
+gemvDivides shape v =
+  [ "k " <> showT shape.inputs <> " is not a multiple of the pack width, " <> showT v.packWidth <> "."
+  | v.packWidth == 0 || shape.inputs `mod` v.packWidth /= 0
+  ]
+    <> [ "n " <> showT shape.outputs <> " is not a multiple of the " <> showT perGroup <> " rows of a threadgroup."
+       | perGroup == 0 || shape.outputs `mod` perGroup /= 0
+       ]
+ where
+  simds = v.threadsPerGroup `div` (targetCaps @t).capSimdWidth
+  perGroup = if v.splitK == 0 then 0 else simds `div` v.splitK * v.rowsPerSimd
 
 -- Static-mode evidence for numbers known at run time.
 data SomeThreads t where

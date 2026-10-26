@@ -173,6 +173,16 @@ nix fmt && git diff --exit-code &&
     and its dimensions as dimensions, together they take every legal value
     of them, and where one takes the kernel's values its extents are no
     larger.
+  - `FuryKernel.Variant`: variant spaces. A family declares its axes (the
+    choices that change how its kernels compute, as rows, threads, pack
+    width and split-K; marked when they decide a reduction's order), its
+    shape classes and which of their dimensions are batch sizes.
+    `enumerate` prunes every point of a class by legality (the family's
+    builder and the gate), divisibility, parallelism (at least two
+    threadgroups per core of a measured `Profile`) and duplicates (the
+    same IR), and names what is left `family_class_x_axiskey`.
+    A launch's fewest threadgroups are the grid's least value over the
+    dimensions' legal values.
   - `FuryKernel.Backend`: the interface target libraries implement: checked
     kernels lowered to one translation unit, the options a runtime compiles
     it with (`CompileOptions`: the language version, and `Strict`

@@ -63,6 +63,7 @@ library
     FuryKernel.Reduce
     FuryKernel.Target
     FuryKernel.Type
+    FuryKernel.Variant
 
   build-depends:
     array >=0.5 && <0.6,
@@ -92,6 +93,7 @@ test-suite furykernel-test
     Test.FuryKernel.ReduceTest
     Test.FuryKernel.Run
     Test.FuryKernel.Targets
+    Test.FuryKernel.VariantTest
 
   ghc-options:
     -threaded

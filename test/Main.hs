@@ -16,6 +16,7 @@ import Test.FuryKernel.InterpTest qualified as InterpTest
 import Test.FuryKernel.JsonTest qualified as JsonTest
 import Test.FuryKernel.NumericsTest qualified as NumericsTest
 import Test.FuryKernel.ReduceTest qualified as ReduceTest
+import Test.FuryKernel.VariantTest qualified as VariantTest
 import Test.Tasty (adjustOption, defaultMain, testGroup)
 import Test.Tasty.Hedgehog (HedgehogReplay (..))
 
@@ -35,6 +36,7 @@ main =
       , InterpTest.tests
       , ReduceTest.tests
       , GemvTest.tests
+      , VariantTest.tests
       , AbiTest.tests
       , EmitRustTest.tests
       , JsonTest.tests
