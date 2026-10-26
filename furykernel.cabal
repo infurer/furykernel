@@ -47,15 +47,19 @@ library
   hs-source-dirs: src
   exposed-modules:
     FuryKernel
+    FuryKernel.Build
     FuryKernel.Constraint
     FuryKernel.Finding
+    FuryKernel.IR
     FuryKernel.Numerics
     FuryKernel.Target
     FuryKernel.Type
 
   build-depends:
     base >=4.21 && <5,
+    containers >=0.7 && <0.8,
     text >=2.1 && <2.2,
+    transformers >=0.6 && <0.7,
 
 test-suite furykernel-test
   import: warnings, extensions
@@ -63,7 +67,9 @@ test-suite furykernel-test
   hs-source-dirs: test
   main-is: Main.hs
   other-modules:
+    Test.FuryKernel.BuildTest
     Test.FuryKernel.ConstraintTest
+    Test.FuryKernel.Kernels
     Test.FuryKernel.NumericsTest
     Test.FuryKernel.Targets
 

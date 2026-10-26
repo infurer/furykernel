@@ -84,12 +84,41 @@ nix fmt && git diff --exit-code &&
     (`Finding`), and where one has a place, the kernel or program and the
     place in it (`locatedAt`); fields that come later leave both as they
     are.
+  - `FuryKernel.IR`: the untyped, first-order, structured IR that every
+    check and pass works on, with a deterministic text form for golden
+    tests and the IR hash, versioned by its first line (`ir 1`). A kernel
+    records the SIMD width its body was built for, which the gate holds to
+    the target's, and a NaN literal is its type's canonical NaN. Of
+    floats, sqrt is correctly rounded and `EFma`, IEEE 754's
+    fusedMultiplyAdd, rounds once; rsqrt, exp, log and tanh are within a
+    bound each target states.
+    binary32 subnormals are a target's choice (`BinOp`'s doc): it may take
+    them as zeros of their signs in arithmetic, comparisons and
+    conversions that compute, and give zeros for subnormal results; an
+    operation that returns an operand may return it unflushed. binary16
+    keeps its subnormals, and so do the interpreter and the CPU target.
+    Statements record the region the builder declared (uniform,
+    SIMD-uniform, divergent); the gate verifies the declarations.
+    Threadgroup arrays lie in the kernel's layout (`tgLayout`): each aligned
+    to 16 B, or its element size if larger, and taking its size rounded up
+    to that; targets allocate the total.
+  - `FuryKernel.Build`: the typed surface. `Sig` declares the interface
+    (dimensions, parameters, buffers with access and alignment, threads,
+    grid), `Scope` the threadgroup memory, `K r` the body in region `r`.
+    Storage types have no `Num` and integers no `FloatScalar`; `fmaE`
+    multiplies and adds with one rounding, the only fusion targets do;
+    barriers need every thread
+    (`AllThreads`), SIMD-group operations every lane (`Converged`), loads
+    and stores the right access; each refusal has its own message.
+    Locals are named by the author (`let_`, `var`) and stay named.
 - `test/`: the test suite, tasty with hedgehog properties, all from one
   seed unless `--hedgehog-replay` gives another. Conversions are
   checked exhaustively where the domain is 16 bits wide, and otherwise
   against exact `Rational` arithmetic. Test targets have SIMD widths from 8
   to 64. Each rule's conditions, as named families and in the decider, are
   checked to agree on sample points.
+  The IR's text, golden, for straight lines, an if, a SIMD-group sum and
+  threadgroup memory.
   `test/no-compile/`: programs static mode must reject, each at one
   place, with the message it must reject them with on its one
   `-- EXPECT:` line.
