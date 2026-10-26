@@ -27,6 +27,7 @@
         ../README.md
         ../furykernel.cabal
         ../src
+        ../test
       ];
     };
 

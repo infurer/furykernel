@@ -17,7 +17,7 @@
         pkgs.runCommand "hlint" {
           nativeBuildInputs = [pkgs.hlint];
         } ''
-          hlint ${self}/src
+          hlint ${self}/src ${self}/test
           touch $out
         '';
 
@@ -46,6 +46,9 @@
           reuse lint
           touch $out
         '';
+
+      # `nix develop`'s shell, the gate's tools in it.
+      devshell = config.devShells.default;
     };
   };
 }

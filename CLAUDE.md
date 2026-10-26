@@ -63,9 +63,19 @@ nix fmt && git diff --exit-code &&
 - `furykernel.cabal`, `src/`: the library, one package. `furykernel.nix` is
   cabal2nix's output, committed so that evaluation never builds anything
   first.
+  - `FuryKernel.Type`: the scalar types. Compute types have arithmetic;
+    storage types (bf16, i8, u8) are widened and narrowed explicitly, floats
+    rounding to nearest, ties to even, integers clamped or wrapped.
+  - `FuryKernel.Numerics`: those conversions as kernels perform them,
+    exact widening and round-to-nearest-even narrowing, and binary64 to
+    binary16 in one rounding, not through binary32 (`narrowF16Double`).
+- `test/`: the test suite, tasty with hedgehog properties, all from one
+  seed unless `--hedgehog-replay` gives another. Conversions are
+  checked exhaustively where the domain is 16 bits wide, and otherwise
+  against exact `Rational` arithmetic.
 - `nix/`: `package.nix` (the library, built with GHC 9.12 under
   `-Werror`), `checks.nix` (the build with its tests, hlint,
-  cabal2nix-in-sync and `reuse lint`), `devshell.nix` and `treefmt.nix`
+  cabal2nix-in-sync and `reuse lint`), `devshell.nix` (`checks.devshell` builds its shell) and `treefmt.nix`
   (`nix fmt` and `checks.treefmt`).
 - `.gitlab-ci.yml`: GitLab CI on x86_64-linux runners. `checks` runs
   `nix flake check --all-systems`, which builds x86_64-linux's checks;
