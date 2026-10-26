@@ -1,12 +1,12 @@
-{ mkDerivation, array, base, containers, hedgehog, lib, tasty
-, tasty-hedgehog, tasty-hunit, text, transformers
+{ mkDerivation, array, base, bytestring, containers, hedgehog, lib
+, tasty, tasty-hedgehog, tasty-hunit, text, transformers
 }:
 mkDerivation {
   pname = "furykernel";
   version = "0.2.0.0";
   src = ./.;
   libraryHaskellDepends = [
-    array base containers text transformers
+    array base bytestring containers text transformers
   ];
   testHaskellDepends = [
     base containers hedgehog tasty tasty-hedgehog tasty-hunit text

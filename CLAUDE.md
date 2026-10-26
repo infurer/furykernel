@@ -135,7 +135,8 @@ nix fmt && git diff --exit-code &&
     it leaves open is split in two down to single points, where it is exact,
     and a refusal names the values that break it (or the boxes, 4096 of
     them, that could not settle it). The same search gives a grid's fewest
-    threadgroups (`lowest`).
+    threadgroups (`lowest`) and shows one size no larger than another
+    (`noLarger`, after polynomial normal forms).
   - `FuryKernel.Interp`: the SIMT interpreter, the reference the kernels'
     specifications are checked with. Lanes run in lockstep with active
     masks; arithmetic is the IR's (binary16 rounded per operation, RNE
@@ -154,6 +155,18 @@ nix fmt && git diff --exit-code &&
     `tgReduceMax` from -inf) from SIMD-group reductions and a scratch array. Their
     order depends on the thread count and SIMD width only, so a row's
     result doesn't depend on the batch.
+  - `FuryKernel.Abi`: a kernel's binary interface, its buffers and its
+    parameter struct in C layout, and the FNV-1a hash of their canonical
+    description, which tuned overrides keep and runtimes' generators assert;
+    the IR hash, of a checked kernel, covers the body too.
+    `FuryKernel.Manifest` describes a
+    kernel in JSON (format `furykernel-manifest`, version 1, with the
+    target it was checked for; `FuryKernel.Json`, writing only).
+    The launch contract (ranges and extents) is outside the hash:
+    `checkOverrides` lets overrides replace a kernel when each has its ABI
+    and its dimensions as dimensions, together they take every legal value
+    of them, and where one takes the kernel's values its extents are no
+    larger.
 - `test/`: the test suite, tasty with hedgehog properties, all from one
   seed unless `--hedgehog-replay` gives another. Conversions are
   checked exhaustively where the domain is 16 bits wide, and otherwise
@@ -169,7 +182,7 @@ nix fmt && git diff --exit-code &&
   maximum up to what the IR leaves to a target, compared by class; a
   threadgroup sum of -0s is -0.
   The IR's text, golden, for straight lines, an if, a SIMD-group sum and
-  threadgroup memory.
+  threadgroup memory; one kernel's IR and ABI hashes pinned.
   Kernels run on the interpreter against f64 specifications: an RMSNorm
   within one bf16 ulp on every SIMD width, and bitwise batch-invariant.
   `test/no-compile/`: programs static mode must reject, each at one

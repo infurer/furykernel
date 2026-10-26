@@ -6,6 +6,7 @@ module Main (main) where
 import Control.Applicative ((<|>))
 import Hedgehog.Internal.Property (Skip (SkipNothing))
 import Hedgehog.Internal.Seed qualified as Seed
+import Test.FuryKernel.AbiTest qualified as AbiTest
 import Test.FuryKernel.BuildTest qualified as BuildTest
 import Test.FuryKernel.CheckTest qualified as CheckTest
 import Test.FuryKernel.ConstraintTest qualified as ConstraintTest
@@ -30,4 +31,5 @@ main =
       , CheckTest.tests
       , InterpTest.tests
       , ReduceTest.tests
+      , AbiTest.tests
       ]

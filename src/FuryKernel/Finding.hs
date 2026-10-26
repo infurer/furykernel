@@ -50,6 +50,10 @@ data Rule
     Regions
   | -- | The kernel checked for the target it was built for.
     Target
+  | {- | Overrides: the ABI of the kernel they replace, together every legal
+    value of its dimensions, and contracts at least as permissive.
+    -}
+    Overrides
   deriving stock (Eq, Ord, Show, Enum, Bounded)
 
 data Finding = MkFinding

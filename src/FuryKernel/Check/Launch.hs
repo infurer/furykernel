@@ -19,7 +19,9 @@ because 'effort' boxes could not show that none do. A launch size the gate
 accepts has one value at every legal point, whether computed in u32,
 which wraps, in u64 or in the integers.
 
-The same search finds a launch size's least value ('lowest').
+The same search finds a launch size's least value ('lowest') and shows one
+launch size no larger than another ('noLarger'), where their polynomial
+normal forms don't show it first.
 -}
 module FuryKernel.Check.Launch (
   -- * Legal values
@@ -28,6 +30,8 @@ module FuryKernel.Check.Launch (
   Box,
   kernelBox,
   pointText,
+  intersect,
+  covers,
 
   -- * Launch sizes
   Size,
@@ -39,6 +43,7 @@ module FuryKernel.Check.Launch (
   effort,
   safety,
   lowest,
+  noLarger,
   checkLaunchSizes,
 ) where
 
@@ -197,6 +202,10 @@ data Failure
     Leaves Size Integer
   | -- | A divisor is 0.
     ByZero Size
+  | -- | One launch size is larger than the other: their values.
+    Larger Integer Integer
+  | -- | None of the boxes takes the point.
+    Outside
   deriving stock (Eq, Show)
 
 -- | A launch size at a point, exactly, step by step as the host computes it.
@@ -270,6 +279,63 @@ lowest box s = case valueAt (leastPoint start) s of
         Right v -> go (min best v) (n + 1) rest
         Left _ -> Nothing
   corners b = rights [valueAt (leastPoint b) s, valueAt (greatestPoint b) s]
+
+{- | Whether launch size @a@ is no larger than @b@ at every point of a box
+where both stay in u32: by their polynomial normal forms, else by interval
+arithmetic over parts of the box.
+-}
+noLarger :: Box -> Size -> Size -> Verdict
+noLarger box a b
+  | atLeast b a = Holds
+  | otherwise = go 0 [over [a, b] box]
+ where
+  go :: Int -> [Box] -> Verdict
+  go _ [] = Holds
+  go n (x : xs)
+    | n >= effort = Open
+    | Just (_, ahi) <- bounds x a, Just (blo, _) <- bounds x b, ahi <= blo = go (n + 1) xs
+    | Just (l, h) <- split x = go (n + 1) (l : h : xs)
+    | otherwise = case (valueAt pt a, valueAt pt b) of
+        (Left f, _) -> Breaks pt f
+        (_, Left f) -> Breaks pt f
+        (Right va, Right vb)
+          | va > vb -> Breaks pt (Larger va vb)
+          | otherwise -> go (n + 1) xs
+   where
+    pt = leastPoint x
+
+-- | The points two boxes share, if they share any.
+intersect :: Box -> Box -> Maybe Box
+intersect a b = sequence (Map.intersectionWith both a b)
+ where
+  -- Legal values are multiples of their step, from the least up.
+  both v w =
+    let step = lcm v.valuesStep w.valuesStep
+        least = (max v.valuesLeast w.valuesLeast + step - 1) `div` step * step
+        greatest = min v.valuesGreatest w.valuesGreatest `div` step * step
+     in if least > greatest then Nothing else Just (Values least step greatest)
+
+-- | Whether every point of a box lies in another, which takes its dimensions.
+within :: Box -> Box -> Bool
+within inner outer = and [maybe False (inside v) (Map.lookup n outer) | (n, v) <- Map.toList inner]
+ where
+  inside v o =
+    v.valuesLeast >= o.valuesLeast
+      && v.valuesGreatest <= o.valuesGreatest
+      && (v.valuesLeast - o.valuesLeast) `mod` o.valuesStep == 0
+      && (v.valuesLeast == v.valuesGreatest || v.valuesStep `mod` o.valuesStep == 0)
+
+-- | Whether every point of a box lies in one of some boxes.
+covers :: [Box] -> Box -> Verdict
+covers boxes = go 0 . pure
+ where
+  go :: Int -> [Box] -> Verdict
+  go _ [] = Holds
+  go n (b : bs)
+    | n >= effort = Open
+    | any (b `within`) boxes = go (n + 1) bs
+    | Just (l, h) <- split b = go (n + 1) (l : h : bs)
+    | otherwise = Breaks (leastPoint b) Outside
 
 ------------------------------------------------------------------------------
 -- Polynomial normal forms
@@ -357,6 +423,8 @@ breachText pt = \case
   Leaves s v -> " leaves u32" <> at <> ": " <> sizeText s <> " is " <> showT v <> "."
   ByZero (Lit _) -> " divides by 0" <> at <> "."
   ByZero d -> " divides by 0" <> at <> ": " <> sizeText d <> " is 0."
+  Larger x y -> " is larger" <> at <> ": " <> showT x <> " against " <> showT y <> "."
+  Outside -> " is outside every box" <> at <> "."
  where
   at = if Map.null pt then "" else " at " <> pointText pt
 
