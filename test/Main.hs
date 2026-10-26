@@ -10,6 +10,7 @@ import Test.FuryKernel.AbiTest qualified as AbiTest
 import Test.FuryKernel.BuildTest qualified as BuildTest
 import Test.FuryKernel.CheckTest qualified as CheckTest
 import Test.FuryKernel.ConstraintTest qualified as ConstraintTest
+import Test.FuryKernel.EmitRustTest qualified as EmitRustTest
 import Test.FuryKernel.InterpTest qualified as InterpTest
 import Test.FuryKernel.NumericsTest qualified as NumericsTest
 import Test.FuryKernel.ReduceTest qualified as ReduceTest
@@ -32,4 +33,5 @@ main =
       , InterpTest.tests
       , ReduceTest.tests
       , AbiTest.tests
+      , EmitRustTest.tests
       ]

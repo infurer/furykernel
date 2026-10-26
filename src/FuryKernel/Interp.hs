@@ -203,7 +203,8 @@ allLanes k = [0 .. fromIntegral k.kernelThreads - 1]
 {- | Launch sizes: u32 expressions over the parameters, as the host computes
 them. 'execute' checks the dimensions against their ranges first, and the
 gate keeps every step of a launch size in u32 for those
-("FuryKernel.Check.Launch"), so nothing here wraps.
+("FuryKernel.Check.Launch"), so nothing here wraps, and the values agree
+with the u64 arithmetic of "FuryKernel.Emit.Rust".
 -}
 hostU32 :: Map Name Value -> Expr -> M s Word32
 hostU32 params = \case

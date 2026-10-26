@@ -259,6 +259,8 @@ tests =
     , testCase "a target whose SIMD groups have no lanes" $
         checkIR ((targetCaps @T32) {capSimdWidth = 0}) (base []) {kernelSimdWidth = 0}
           @?= [Finding Target "T32's SIMD groups have no lanes."]
+    , testCase "names: Rust's prelude's variants" $
+        map (.findingMessage) (findings [SLet "Some" TF32 (f32 0)]) @?= ["The name Some is reserved in a target language."]
     , testCase "names: fk_ in any case, and the targets' library functions" $
         map (.findingMessage) (findings [SLet "FK_x" TF32 (f32 0), SLet "max" TF32 (f32 0), SLet "fma" TF32 (f32 0)])
           @?= ["The name FK_x starts with fk_ in some case, which generated code reserves.", "The name max is reserved in a target language.", "The name fma is reserved in a target language."]

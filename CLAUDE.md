@@ -167,6 +167,18 @@ nix fmt && git diff --exit-code &&
     and its dimensions as dimensions, together they take every legal value
     of them, and where one takes the kernel's values its extents are no
     larger.
+  - `FuryKernel.Backend`: the interface target libraries implement: checked
+    kernels lowered to one translation unit, the options a runtime compiles
+    it with (`CompileOptions`: the language version, and `Strict`
+    arithmetic, the IR's, with nothing fast-math assumes and no
+    multiply-add contracted but an `fmaE`), and its launch tables (entry, binding
+    indices, geometry, ABI). `FuryKernel.Emit.Rust`: the
+    target-independent pieces of generated Rust (parameter structs with
+    their layout asserted, launch sizes in u64), which runtimes' generators
+    combine with their own types.
+    The gate keeps launch sizes in u32 at every step, so their u64 agrees
+    with the interpreter's u32 for dimensions in their ranges.
+  - `FuryKernel`: what a kernel author imports.
 - `test/`: the test suite, tasty with hedgehog properties, all from one
   seed unless `--hedgehog-replay` gives another. Conversions are
   checked exhaustively where the domain is 16 bits wide, and otherwise

@@ -112,9 +112,11 @@ forPlace v = "for " <> v
 
 {- | Words no name may be: C++ keywords, which every shading language
 inherits, the qualifiers, types, builtins and library functions of the
-Metal, CUDA and HIP languages, and the words Metal refuses as
-identifiers. Generated code reserves names starting with @fk_@, in any
-case; no name may start with an underscore, which C++ reserves in places.
+Metal, CUDA and HIP languages, the words Metal refuses as identifiers, and
+the Rust keywords that cannot be raw identifiers (generated Rust escapes
+the others) and its prelude's variants. Generated code reserves names
+starting with @fk_@, in any case; no name may start with an underscore,
+which C++ reserves in places.
 -}
 reservedNames :: Set Text
 reservedNames =
@@ -134,6 +136,7 @@ reservedNames =
       , "metal main threadIdx blockIdx blockDim gridDim warpSize"
       , "max min select fma simd_sum simd_max simd_min local global"
       , "as_type ray_data object_data"
+      , "self Self super crate None Some Ok Err"
       ]
 
 checkNames :: IR.Kernel -> [Finding]

@@ -48,10 +48,12 @@ library
   exposed-modules:
     FuryKernel
     FuryKernel.Abi
+    FuryKernel.Backend
     FuryKernel.Build
     FuryKernel.Check
     FuryKernel.Check.Launch
     FuryKernel.Constraint
+    FuryKernel.Emit.Rust
     FuryKernel.Finding
     FuryKernel.IR
     FuryKernel.Interp
@@ -80,6 +82,7 @@ test-suite furykernel-test
     Test.FuryKernel.BuildTest
     Test.FuryKernel.CheckTest
     Test.FuryKernel.ConstraintTest
+    Test.FuryKernel.EmitRustTest
     Test.FuryKernel.InterpTest
     Test.FuryKernel.Kernels
     Test.FuryKernel.NumericsTest
