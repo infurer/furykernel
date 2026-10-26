@@ -61,6 +61,7 @@ library
     FuryKernel.Manifest
     FuryKernel.Numerics
     FuryKernel.Reduce
+    FuryKernel.Selection
     FuryKernel.Target
     FuryKernel.Type
     FuryKernel.Variant
@@ -92,6 +93,7 @@ test-suite furykernel-test
     Test.FuryKernel.NumericsTest
     Test.FuryKernel.ReduceTest
     Test.FuryKernel.Run
+    Test.FuryKernel.SelectionTest
     Test.FuryKernel.Targets
     Test.FuryKernel.VariantTest
 

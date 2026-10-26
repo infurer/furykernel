@@ -183,6 +183,14 @@ nix fmt && git diff --exit-code &&
     same IR), and names what is left `family_class_x_axiskey`.
     A launch's fewest threadgroups are the grid's least value over the
     dimensions' legal values.
+  - `FuryKernel.Selection`: the committed choice of one variant per
+    shape class (`selection.json`, format `furykernel-selection` version
+    1, with the GPU profile tuning measured and each pick's IR hash), read
+    (its format and version first) and validated against a space and a
+    profile: made for that profile, every class picked once, every pick
+    surviving pruning and still the kernel it was picked as, and classes
+    that differ only in batch size agreeing on the axes that order
+    reductions, so that a row's result doesn't depend on its batch.
   - `FuryKernel.Backend`: the interface target libraries implement: checked
     kernels lowered to one translation unit, the options a runtime compiles
     it with (`CompileOptions`: the language version, and `Strict`
