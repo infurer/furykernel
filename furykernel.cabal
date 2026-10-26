@@ -55,6 +55,7 @@ library
     FuryKernel.IR
     FuryKernel.Interp
     FuryKernel.Numerics
+    FuryKernel.Reduce
     FuryKernel.Target
     FuryKernel.Type
 
@@ -77,6 +78,8 @@ test-suite furykernel-test
     Test.FuryKernel.InterpTest
     Test.FuryKernel.Kernels
     Test.FuryKernel.NumericsTest
+    Test.FuryKernel.ReduceTest
+    Test.FuryKernel.Run
     Test.FuryKernel.Targets
 
   ghc-options:

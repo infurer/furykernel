@@ -150,6 +150,10 @@ nix fmt && git diff --exit-code &&
     seeded order, so races show; undefined behaviour is an error: accesses
     past what the kernel declares, however much the launch gives,
     dimensions outside their range, integer division by zero or overflow.
+  - `FuryKernel.Reduce`: threadgroup reductions (`tgReduceSum` from -0,
+    `tgReduceMax` from -inf) from SIMD-group reductions and a scratch array. Their
+    order depends on the thread count and SIMD width only, so a row's
+    result doesn't depend on the batch.
 - `test/`: the test suite, tasty with hedgehog properties, all from one
   seed unless `--hedgehog-replay` gives another. Conversions are
   checked exhaustively where the domain is 16 bits wide, and otherwise
@@ -162,9 +166,12 @@ nix fmt && git diff --exit-code &&
   IEEE 754's special cases; rsqrt, exp, log and tanh rounded once from
   binary64, over every binary16 and where macOS's binary32 exp misrounds;
   integers narrowed clamped and wrapped, and minimum and
-  maximum up to what the IR leaves to a target, compared by class.
+  maximum up to what the IR leaves to a target, compared by class; a
+  threadgroup sum of -0s is -0.
   The IR's text, golden, for straight lines, an if, a SIMD-group sum and
   threadgroup memory.
+  Kernels run on the interpreter against f64 specifications: an RMSNorm
+  within one bf16 ulp on every SIMD width, and bitwise batch-invariant.
   `test/no-compile/`: programs static mode must reject, each at one
   place, with the message it must reject them with on its one
   `-- EXPECT:` line.

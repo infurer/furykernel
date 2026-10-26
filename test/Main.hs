@@ -11,6 +11,7 @@ import Test.FuryKernel.CheckTest qualified as CheckTest
 import Test.FuryKernel.ConstraintTest qualified as ConstraintTest
 import Test.FuryKernel.InterpTest qualified as InterpTest
 import Test.FuryKernel.NumericsTest qualified as NumericsTest
+import Test.FuryKernel.ReduceTest qualified as ReduceTest
 import Test.Tasty (adjustOption, defaultMain, testGroup)
 import Test.Tasty.Hedgehog (HedgehogReplay (..))
 
@@ -28,4 +29,5 @@ main =
       , BuildTest.tests
       , CheckTest.tests
       , InterpTest.tests
+      , ReduceTest.tests
       ]

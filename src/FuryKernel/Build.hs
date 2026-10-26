@@ -113,6 +113,7 @@ module FuryKernel.Build (
   whenSimd,
   whenLane,
   forU,
+  forStep,
   strided,
   threadIndex,
   groupIndex,
@@ -120,6 +121,10 @@ module FuryKernel.Build (
   simdGroupIndex,
   threadCount,
   simdGroupCount,
+  simdWidth,
+  simdGroups,
+  note,
+  f32,
 ) where
 
 import Control.Monad (when)
@@ -142,6 +147,7 @@ import FuryKernel.IR qualified as IR
 import FuryKernel.Numerics (rationalF16)
 import FuryKernel.Target (Target, TargetCaps (..), targetCaps)
 import FuryKernel.Type (BF16, F16 (..), IsScalar (..), ScalarType (..))
+import GHC.Float (castWord32ToFloat)
 import GHC.TypeError (ErrorMessage (..), Unsatisfiable)
 import GHC.TypeNats (KnownNat, Nat, natVal)
 import Numeric.Natural (Natural)
@@ -848,6 +854,15 @@ forU n (Exp lo) (Exp hi) body = K $ do
   inner <- block (body (Exp (IR.EVar v)))
   emit (IR.SFor IR.RUniform v lo hi (IR.ELit (IR.LU32 1)) inner)
 
+{- | @for (i = start; i < end; i += step)@ with any bounds: lanes may leave
+at different iterations, so the body is 'Divergent'.
+-}
+forStep :: Name -> Exp Word32 -> Exp Word32 -> Exp Word32 -> (Exp Word32 -> K Divergent ()) -> K r ()
+forStep n (Exp start) (Exp end) (Exp step) body = K $ do
+  v <- fresh n
+  inner <- block (body (Exp (IR.EVar v)))
+  emit (IR.SFor IR.RDivergent v start end step inner)
+
 {- | The threads of the threadgroup take turns over @[0, n)@: thread @i@
 visits @i@, @i + threads@, and so on. Lanes may stop at different
 iterations, so the body is 'Divergent'.
@@ -875,3 +890,26 @@ simdGroupCount = K $ do
   n <- gets (fromMaybe 0 . (.threadsPer))
   w <- gets (.caps.capSimdWidth)
   pure (Exp (IR.ELit (IR.LU32 (fromIntegral (n `div` max 1 w)))))
+
+-- | Lanes per SIMD group on the target, as a literal.
+simdWidth :: K r (Exp Word32)
+simdWidth = K (gets (Exp . IR.ELit . IR.LU32 . fromIntegral . (.caps.capSimdWidth)))
+
+{- | A problem the gate reports, for libraries that check their own
+preconditions while they build, by a rule of "FuryKernel.Finding".
+-}
+note :: Rule -> T.Text -> K r ()
+note r msg = K (problem r msg)
+
+-- | SIMD groups per threadgroup, as a number, for checks while building.
+simdGroups :: K r Natural
+simdGroups = K $ do
+  n <- gets (fromMaybe 0 . (.threadsPer))
+  w <- gets (.caps.capSimdWidth)
+  pure (n `div` max 1 w)
+
+{- | A binary32 literal from its value, infinities and NaNs included: every
+NaN is the canonical one, the quiet NaN 0x7fc00000.
+-}
+f32 :: Float -> Exp Float
+f32 x = Exp (IR.ELit (IR.LF32 (if isNaN x then castWord32ToFloat 0x7fc00000 else x)))

@@ -55,12 +55,13 @@ tests =
             , "  }"
             , "}"
             ]
-    , testCase "a binary16 literal is its value rounded once" $
+    , testCase "a NaN literal is the canonical NaN, a binary16 literal its value rounded once" $
         renderKernel (kernelIR literals)
           @?= T.unlines
             [ "ir 1"
             , "kernel literals threads 32 simd 32 groups 1u"
             , "{"
+            , "  let nan : f32 = f32:0x7fc00000"
             , "  let h : f16 = f16:0x3c01"
             , "}"
             ]
@@ -134,12 +135,15 @@ controlled = kernel "controlled" $ do
       barrier
       whenLane (threadIndex .< 2) $ store y threadIndex (tgLoad partial threadIndex)
 
--- | 1 + 2^-11 + 2^-30, which rounding through binary32 would make 1.
+{- | A NaN whatever the host makes of 0 / 0, and 1 + 2^-11 + 2^-30, which
+rounding through binary32 would make 1.
+-}
 literals :: Kernel T32
 literals = kernel "literals" $ do
   threads @32
   groups 1
   pure . pure $ do
+    _ <- let_ "nan" (f32 (0 / 0))
     _ <- let_ "h" (fromRational (1 + 1 / 2048 + 1 / 1073741824) :: Exp F16)
     pure ()
 

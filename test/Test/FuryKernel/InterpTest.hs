@@ -8,12 +8,9 @@ module Test.FuryKernel.InterpTest (tests) where
 import Data.Bits ((.&.))
 import Data.Int (Int32, Int8)
 import Data.List (nub)
-import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Text qualified as T
-import Data.Word (Word16, Word32, Word64, Word8)
+import Data.Word (Word16, Word32, Word8)
 import FuryKernel.Build
-import FuryKernel.Check (check)
 import FuryKernel.Constraint (TgArrayOk, ThreadsOk)
 import FuryKernel.IR (DimRange (..), Name)
 import FuryKernel.Interp
@@ -25,6 +22,7 @@ import Hedgehog (Property, forAll, property, (===))
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Test.FuryKernel.Kernels (scale)
+import Test.FuryKernel.Run (runOn)
 import Test.FuryKernel.Targets (T16, T32, T64, T8)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, testCase, (@?=))
@@ -93,6 +91,11 @@ tests =
           @?= Left (UninitializedRead "t" 1)
         runOn @T32 divide [("d", VU32 0)] [("y", [VU32 0])] 0
           @?= Left DivideByZero
+    , testCase "a loop whose variable stands still or wraps never ends" $ do
+        let stepping start step = runOn @T32 fromBy [("start", VU32 start), ("step", VU32 step)] [("y", [VU32 0])] 0
+        stepping 0 0 @?= Left (NonTermination "i")
+        stepping 4294967290 7 @?= Left (NonTermination "i")
+        stepping 4294967290 5 @?= Right (Map.fromList [("y", [VU32 1])])
     , testCase "the declared contract: buffers to their extents, dimensions in their range" $ do
         -- The elements past a buffer's extent come back as given.
         runOn @T32 count [("n", VU32 3)] [("y", replicate 5 (VU32 0))] 0
@@ -132,19 +135,6 @@ tests =
         fmap (\m -> map (`Map.lookup` m) ["clamped_a", "wrapped_a", "clamped_b", "wrapped_b"]) out
           @?= Right [Just (map VI8 [127, -128, -128, 127]), Just (map VI8 [44, -44, 127, 127]), Just (map VU8 [255, 255, 255, 255]), Just (map VU8 [44, 255, 0, 255])]
     ]
-
--- | Checks a kernel and runs it.
-runOn ::
-  forall t.
-  (Target t) =>
-  Kernel t ->
-  [(Name, Value)] ->
-  [(Name, [Value])] ->
-  Word64 ->
-  Either RunError (Map Name [Value])
-runOn k ps bs seed = case check k of
-  Left fs -> Left (Internal (T.pack (show fs)))
-  Right c -> run c (withSeed seed (launch (Map.fromList ps) (Map.fromList bs)))
 
 -- | Bit for bit what the kernel's arithmetic says, NaNs included.
 scaleSpec :: Property
@@ -194,10 +184,10 @@ total = kernel "total" $ do
       s <- simdSum "s" threadIndex
       whenLane (simdLane .== 0) (tgStore partial simdGroupIndex s)
       barrier
-      simdGroups <- simdGroupCount
+      groupCount <- simdGroupCount
       whenLane (threadIndex .== 0) $ do
         acc <- var "acc" 0
-        forU "g" 0 simdGroups $ \g -> acc .= get acc + tgLoad partial g
+        forU "g" 0 groupCount $ \g -> acc .= get acc + tgLoad partial g
         store y 0 (get acc)
 
 -- | Every thread stores to one address.
@@ -229,6 +219,19 @@ divide = kernel "divide" $ do
   threads @32
   groups 1
   pure . pure $ whenLane (threadIndex .== 0) (store y 0 (1 `quotE` d))
+
+-- | Lane 0 counts its loop's iterations, from @start@ by @step@ to u32's greatest.
+fromBy :: forall t. (Target t, ThreadsOk t 32) => Kernel t
+fromBy = kernel "from_by" $ do
+  start <- param @Word32 "start"
+  step <- param @Word32 "step"
+  y <- buffer @WriteOnly @16 @Word32 "y" 1
+  threads @32
+  groups 1
+  pure . pure $ whenLane (threadIndex .== 0) $ do
+    n <- var "n" 0
+    forStep "i" start 4294967295 step $ \_ -> n .= get n + 1
+    store y 0 (get n)
 
 -- | Stores x[i], of a buffer of four, to y[j], of a buffer of one.
 pastExtent :: Word32 -> Word32 -> Kernel T32

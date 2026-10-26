@@ -4,11 +4,14 @@
 -- | Kernels the tests share.
 module Test.FuryKernel.Kernels (
   scale,
+  rmsnorm,
 ) where
 
+import Data.Word (Word32)
 import FuryKernel.Build
-import FuryKernel.Constraint (ThreadsOk)
+import FuryKernel.Constraint (TgArrayOk, ThreadsOk)
 import FuryKernel.IR (DimRange (..))
+import FuryKernel.Reduce (tgReduceSum)
 import FuryKernel.Target (Target)
 import FuryKernel.Type (BF16)
 
@@ -25,3 +28,30 @@ scale = kernel "scale" $ do
     strided "i" n $ \i -> do
       v <- let_ "v" (widen @Float (load x i))
       store y i (narrow @BF16 (v * s))
+
+{- | RMSNorm over rows of @hidden@ elements, one threadgroup per row:
+y = x / sqrt (mean x² + eps) * w, in bf16 with f32 arithmetic.
+-}
+rmsnorm :: forall t. (Target t, ThreadsOk t 256, TgArrayOk t 32 Float) => Word32 -> Kernel t
+rmsnorm hidden = kernel "rmsnorm" $ do
+  rows <- dim "rows" (DimRange 1 4096 1)
+  eps <- param @Float "eps"
+  x <- buffer @ReadOnly @16 @BF16 "x" (rows * h)
+  w <- buffer @ReadOnly @16 @BF16 "w" h
+  y <- buffer @WriteOnly @16 @BF16 "y" (rows * h)
+  threads @256
+  groups rows
+  pure $ do
+    scratch <- tgArray @32 @Float "scratch"
+    pure $ do
+      base <- let_ "base" (groupIndex * h)
+      acc <- var "acc" 0
+      strided "i" h $ \i -> do
+        v <- let_ "v" (widen @Float (load x (base + i)))
+        acc .= get acc + v * v
+      total <- tgReduceSum "sum_sq" scratch (get acc)
+      scale' <- let_ "scale" (rsqrtE (total / toF32 h + eps))
+      strided "j" h $ \j ->
+        store y (base + j) (narrow @BF16 (widen @Float (load x (base + j)) * scale' * widen @Float (load w j)))
+ where
+  h = fromIntegral hidden
