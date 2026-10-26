@@ -166,7 +166,8 @@ nix fmt && git diff --exit-code &&
     the IR hash, of a checked kernel, covers the body too.
     `FuryKernel.Manifest` describes a
     kernel in JSON (format `furykernel-manifest`, version 1, with the
-    target it was checked for; `FuryKernel.Json`, writing only).
+    target it was checked for; `FuryKernel.Json`: deterministic writing,
+    and reading of integer-only JSON with unique keys).
     The launch contract (ranges and extents) is outside the hash:
     `checkOverrides` lets overrides replace a kernel when each has its ABI
     and its dimensions as dimensions, together they take every legal value

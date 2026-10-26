@@ -13,6 +13,7 @@ import Test.FuryKernel.ConstraintTest qualified as ConstraintTest
 import Test.FuryKernel.EmitRustTest qualified as EmitRustTest
 import Test.FuryKernel.GemvTest qualified as GemvTest
 import Test.FuryKernel.InterpTest qualified as InterpTest
+import Test.FuryKernel.JsonTest qualified as JsonTest
 import Test.FuryKernel.NumericsTest qualified as NumericsTest
 import Test.FuryKernel.ReduceTest qualified as ReduceTest
 import Test.Tasty (adjustOption, defaultMain, testGroup)
@@ -36,4 +37,5 @@ main =
       , GemvTest.tests
       , AbiTest.tests
       , EmitRustTest.tests
+      , JsonTest.tests
       ]
