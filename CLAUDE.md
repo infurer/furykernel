@@ -201,7 +201,11 @@ nix fmt && git diff --exit-code &&
   The IR's text, golden, for straight lines, packs, an if, a SIMD-group sum
   and threadgroup memory; one kernel's IR and ABI hashes pinned.
   Kernels run on the interpreter against f64 specifications: an RMSNorm
-  within one bf16 ulp on every SIMD width, and bitwise batch-invariant.
+  within one bf16 ulp on every SIMD width, and bitwise batch-invariant; a
+  bf16 GEMV family with packs and split-K (`Test.FuryKernel.Gemv`), bit
+  for bit where f32 sums are exact and within the bound of f32
+  accumulation elsewhere, a row's bits the same for every m, place in the
+  batch, rows per SIMD group and thread count.
   `test/no-compile/`: programs static mode must reject, each at one
   place, with the message it must reject them with on its one
   `-- EXPECT:` line.

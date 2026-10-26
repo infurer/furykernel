@@ -83,6 +83,8 @@ test-suite furykernel-test
     Test.FuryKernel.CheckTest
     Test.FuryKernel.ConstraintTest
     Test.FuryKernel.EmitRustTest
+    Test.FuryKernel.Gemv
+    Test.FuryKernel.GemvTest
     Test.FuryKernel.InterpTest
     Test.FuryKernel.Kernels
     Test.FuryKernel.NumericsTest
