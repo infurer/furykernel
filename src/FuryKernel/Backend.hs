@@ -4,9 +4,10 @@
 {- | What a target library provides: the lowering of checked kernels to one
 translation unit, and the launch tables its runtime needs.
 
-The core defines the interface and no backend; furykernel-metal's is the
-first. Backends emit source only. Runtimes compile it with the vendor's
-compiler at run time, so no backend needs a GPU to build or to be tested.
+The core defines the interface and one backend, the CPU target of
+"FuryKernel.Cpu"; furykernel-metal's is the first for a GPU. Backends emit
+source only. Runtimes compile it with the vendor's compiler at run time,
+so no backend needs a GPU to build or to be tested.
 -}
 module FuryKernel.Backend (
   Backend (..),
@@ -83,7 +84,10 @@ data LoweredKernel = LoweredKernel
   , lkBindings :: [(Name, Natural)]
   -- ^ The binding index of every buffer, then every table, by name.
   , lkParamsBinding :: Maybe Natural
-  -- ^ The binding index of the parameter struct, if the kernel has one.
+  {- ^ The binding index of the parameter struct, if the kernel has one and
+  the target binds it: the CPU target passes it as its functions' first
+  argument instead.
+  -}
   , lkTgMemory :: Natural
   {- ^ Threadgroup memory, in bytes: the total of the kernel's layout
   ('FuryKernel.IR.tgLayout'), each array aligned to 16 bytes at least,

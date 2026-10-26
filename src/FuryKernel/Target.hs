@@ -8,7 +8,8 @@ A target is a type whose associated types state its limits. Static checks
 read them at the type level (see "FuryKernel.Constraint"); the gate and
 dynamic mode read them reflected once into 'TargetCaps'. Each target
 library defines its own (furykernel-metal's @AppleGPU9@, for one); the core
-defines none, and its portable code is generic in the target.
+defines one, "FuryKernel.Cpu"'s @Cpu@, and its portable code is generic in
+the target.
 
 What a target makes legal is not what makes it fast: measured profiles
 (bandwidth, cores, power state) live with the tuning, not here.

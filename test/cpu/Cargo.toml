@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Mika Tammi
+# SPDX-License-Identifier: BSD-3-Clause
+
+# The CPU target's Rust against the interpreter. checks.cpu writes src/gen,
+# src/cases.rs, src/launch.rs and data from Cases.hs, then runs this.
+[package]
+name = "furykernel-cpu-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+half = "=2.7.1"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }

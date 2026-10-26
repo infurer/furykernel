@@ -6,6 +6,11 @@ SPDX-PackageDownloadLocation = "https://github.com/infurer/furykernel"
 # Files that cannot carry an SPDX comment themselves.
 
 [[annotations]]
+path = "test/cpu/Cargo.lock"
+SPDX-FileCopyrightText = "2026 Mika Tammi"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+[[annotations]]
 path = "flake.lock"
 SPDX-FileCopyrightText = "2026 Mika Tammi"
 SPDX-License-Identifier = "BSD-3-Clause"

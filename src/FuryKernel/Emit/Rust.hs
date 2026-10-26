@@ -2,8 +2,10 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 
 {- | The target-independent pieces of generated Rust: names, scalar types,
-launch-size expressions and parameter structs whose layout is asserted at
-compile time. Runtimes' generators put them together with their own types.
+launch-size expressions, the checks that hold dimensions to their ranges
+before a launch size is computed from them, and parameter structs whose
+layout is asserted at compile time. Runtimes' generators put them together
+with their own types.
 
 16-bit floats are spelled with the @half@ crate's types, and integer
 literals with their digits in groups of three, so that the output passes
@@ -15,6 +17,8 @@ module FuryKernel.Emit.Rust (
   rustScalarType,
   rustLaunchExpr,
   rustLaunchTerm,
+  rustDimChecks,
+  dimRangeText,
   rustParamsStruct,
 ) where
 
@@ -23,7 +27,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import FuryKernel.Abi (Abi (..), Field (..))
-import FuryKernel.IR (BinOp (..), Expr (..), Literal (..), Name)
+import FuryKernel.IR (BinOp (..), DimRange (..), Expr (..), Literal (..), Name, Param (..), ParamRole (..))
 import FuryKernel.Type (ScalarType (..))
 
 -- | A FuryKernel name as a Rust identifier: raw where it is a Rust keyword.
@@ -80,6 +84,28 @@ rustLaunchTerm = \case
   EParam n -> "u64::from(" <> rustIdent n <> ")"
   e@(EBin {}) -> "(" <> rustLaunchExpr e <> ")"
   e -> error ("rustLaunchTerm: not a launch size: " <> show e)
+
+{- | A kernel's dimensions held to their declared ranges and multiples,
+the values the gate proves its launch sizes for: an @assert!@ for each
+dimension whose range says anything, over a @u32@ variable of its name,
+before anything is computed from it. One outside its range panics with
+the kernel's name, the dimension, its value and its range.
+-}
+rustDimChecks :: Name -> [Param] -> [Text]
+rustDimChecks kernel ps =
+  [ "assert!(" <> T.intercalate " && " conditions <> ", \"" <> kernel <> ": the dimension " <> p.paramName <> " is " <> shown <> ", outside its range " <> dimRangeText r <> ".\"" <> argument <> ");"
+  | p <- ps
+  , Dim r <- [p.paramRole]
+  , let v = rustIdent p.paramName
+        conditions = [v <> " >= " <> grouped r.dimMin | r.dimMin > 0] <> [v <> " <= " <> grouped r.dimMax | r.dimMax < 4294967295] <> [v <> " % " <> grouped r.dimMultipleOf <> " == 0" | r.dimMultipleOf > 1]
+        -- A raw identifier can't be named in a format string.
+        (shown, argument) = if v == p.paramName then ("{" <> v <> "}", "") else ("{}", ", " <> v)
+  , not (null conditions)
+  ]
+
+-- | A dimension's range as messages and the IR's text give it: @8..64 multiple of 8@, @1..16@.
+dimRangeText :: DimRange -> Text
+dimRangeText r = T.pack (show r.dimMin) <> ".." <> T.pack (show r.dimMax) <> (if r.dimMultipleOf > 1 then " multiple of " <> T.pack (show r.dimMultipleOf) else "")
 
 -- | Digits in groups of three, as clippy wants long literals written.
 grouped :: (Show a) => a -> Text

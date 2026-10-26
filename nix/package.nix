@@ -27,8 +27,9 @@
         ../README.md
         ../furykernel.cabal
         ../src
-        # The no-compile tests are checks.no-compile's, not the build's.
-        (lib.fileset.difference ../test ../test/no-compile)
+        # The no-compile tests are checks.no-compile's, and test/cpu
+        # checks.cpu's, not the build's.
+        (lib.fileset.difference ../test (lib.fileset.unions [../test/no-compile ../test/cpu]))
       ];
     };
 

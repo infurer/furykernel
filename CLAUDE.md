@@ -58,8 +58,9 @@ nix fmt && git diff --exit-code &&
 
 ## Architecture
 
-- `flake.nix`: flake-parts on nixos-26.05; systems x86_64-linux,
-  aarch64-linux and aarch64-darwin.
+- `flake.nix`: flake-parts on nixos-26.05, crane and rust-overlay for the
+  CPU target's check; systems x86_64-linux, aarch64-linux and
+  aarch64-darwin.
 - `furykernel.cabal`, `src/`: the library, one package. `furykernel.nix` is
   cabal2nix's output, committed so that evaluation never builds anything
   first.
@@ -71,7 +72,7 @@ nix fmt && git diff --exit-code &&
     binary16 in one rounding, not through binary32 (`narrowF16Double`).
   - `FuryKernel.Target`: the `Target` class, whose associated types state a
     GPU family's limits, reflected into `TargetCaps`. Target libraries
-    define the instances; the core defines none.
+    define the instances; the core defines one, `FuryKernel.Cpu`'s `Cpu`.
   - `FuryKernel.Constraint`: each resource rule twice, as a type family for
     static mode and as a term decider for the gate and dynamic mode, which
     reflects runtime numbers into the static constraints: threads,
@@ -202,10 +203,31 @@ nix fmt && git diff --exit-code &&
     multiply-add contracted but an `fmaE`), and its launch tables (entry, binding
     indices, geometry, ABI). `FuryKernel.Emit.Rust`: the
     target-independent pieces of generated Rust (parameter structs with
-    their layout asserted, launch sizes in u64), which runtimes' generators
-    combine with their own types.
+    their layout asserted, launch sizes in u64, dimensions asserted in
+    their ranges), which runtimes' generators combine with their own
+    types.
     The gate keeps launch sizes in u32 at every step, so their u64 agrees
     with the interpreter's u32 for dimensions in their ranges.
+  - `FuryKernel.Cpu`: the CPU target, `Cpu` with the portable kernels'
+    limits, and its backend: checked kernels as Rust, in the interpreter's
+    model (every local a vector with a lane per thread, each statement run
+    for the active lanes in order, branches splitting them), so that
+    runtimes without a GPU run the kernels their GPUs run. Its output needs
+    the `half` crate. Rsqrt, exp, log and tanh are binary64's, rounded
+    once, as the interpreter's: to binary16 by a rounding of its own, since
+    the crate's `from_f64` goes through binary32 on x86 and keeps only the
+    upper bits in its portable code. An fma is `mul_add` in f32 and goes
+    through binary64 in f16.
+    It refuses two kernels of one name in a module, and two whose names
+    make one Rust type name.
+    A kernel asserts its dimensions' ranges and multiples before it
+    computes anything from them, so a launch the interpreter refuses
+    panics, naming the kernel, the dimension, its value and its range
+    (`FuryKernel.Emit.Rust`'s `rustDimChecks`, for runtimes' launch code
+    too).
+    `checks.cpu` holds its Rust to the interpreter bit for bit, but for the
+    NaN payloads of arithmetic (`test/cpu`), and `checks.cpu-clippy` holds
+    it to pedantic clippy.
   - `FuryKernel.Program`: the program layer, what a model computes in one
     step. `.Graph`: straight-line dataflow over row values (each of a
     step's m rows one token, its elements in segments such as heads or an
@@ -266,17 +288,25 @@ nix fmt && git diff --exit-code &&
   for bit where f32 sums are exact and within the bound of f32
   accumulation elsewhere, a row's bits the same for every m, place in the
   batch, rows per SIMD group and thread count.
-  Programs: the gate, the evaluator on small cases (caches bound sparsely,
-  a paged pool of 2^33 elements by two of its blocks), and the planner's
+  The CPU target's Rust, golden; `checks.cpu` holds it to the
+  interpreter's bits and refusals (a dimension out of its range or off
+  its multiple). Programs: the gate, the evaluator on small cases
+  (caches bound sparsely, a paged pool of 2^33 elements by two of its
+  blocks), and the planner's
   steps for a mixture-of-experts decoder layer, a head and an embedding,
   against golden text.
   `test/no-compile/`: programs static mode must reject, each at one
   place, with the message it must reject them with on its one
   `-- EXPECT:` line.
+  `test/cpu/`: `checks.cpu`'s crate; `Cases.hs` writes its kernels as the
+  CPU target lowers them, the interpreter's inputs and outputs, and the
+  pieces of `FuryKernel.Emit.Rust` that runtimes generate.
 - `nix/`: `package.nix` (the library, built with GHC 9.12 under
   `-Werror`), `checks.nix` (the build with its tests, the no-compile tests,
-  hlint, cabal2nix-in-sync and `reuse lint`), `devshell.nix` (`checks.devshell` builds its shell) and
-  `treefmt.nix` (`nix fmt` and `checks.treefmt`).
+  the CPU target's Rust against the interpreter and under clippy, hlint,
+  cabal2nix-in-sync and `reuse lint`), `rust.nix` (crane and the Rust
+  toolchain for that check), `devshell.nix` (`checks.devshell` builds its shell) and `treefmt.nix` (`nix fmt`
+  and `checks.treefmt`).
 - `.gitlab-ci.yml`: GitLab CI on x86_64-linux runners. `checks` runs
   `nix flake check --all-systems`, which builds x86_64-linux's checks;
   `publish-github`, on master once those passed, pushes master, and the

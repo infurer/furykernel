@@ -53,6 +53,7 @@ library
     FuryKernel.Check
     FuryKernel.Check.Launch
     FuryKernel.Constraint
+    FuryKernel.Cpu
     FuryKernel.Emit.Rust
     FuryKernel.Finding
     FuryKernel.IR
@@ -90,6 +91,7 @@ test-suite furykernel-test
     Test.FuryKernel.BuildTest
     Test.FuryKernel.CheckTest
     Test.FuryKernel.ConstraintTest
+    Test.FuryKernel.CpuTest
     Test.FuryKernel.EmitRustTest
     Test.FuryKernel.Gemv
     Test.FuryKernel.GemvTest
