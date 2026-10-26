@@ -261,8 +261,12 @@ nix fmt && git diff --exit-code &&
     threadgroups of a step made; light steps hold stores into caches,
     attention's combine (once: its step stores what later steps read
     and makes the outputs that need nothing more) and the outputs no
-    anchor computes. A placement
-    never changes a value's arithmetic, only where it runs.
+    anchor computes. Gated
+    (`optGated`), the routes routed layers read, and those the program
+    outputs, are stored by a light step before the first step that reads
+    a table, so that an engine can fetch the routed weights, and read
+    the other routes, in between. A placement never changes a value's
+    arithmetic, only where it runs.
     A combine step names no cache, and `nodeCost` what recomputing an
     operation costs, as the planner counts it.
   - `FuryKernel`: what a kernel author imports.

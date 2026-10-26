@@ -48,6 +48,35 @@ tests =
     , testCase "gated, the experts wait for a stored route" $
         fmap (map (.stepName) . (.planSteps) . plan defaultPlanOptions {optGated = True}) (checkProgram (layer False))
           @?= Right ["s0_gemv", "s1_store", "s2_attend", "s3_combine", "s4_gemv", "s5_gemv", "s6_route_ids", "s7_gemv", "s8_gemv", "s9_gemv", "s10_x2"]
+    , testCase "gated, a route the program outputs is stored beside the experts' route" $
+        fmap (T.lines . renderPlan . plan defaultPlanOptions {optGated = True}) (checkProgram predicting)
+          @?= Right
+            [ "plan predicting"
+            , "  step s0_gemv"
+            , "    anchor router_logits"
+            , "    anchor ahead_logits"
+            , "    reads x f32"
+            , "    stores router_logits f32"
+            , "    stores ahead_logits f32"
+            , "  step s1_route_ids"
+            , "    recompute route_ids"
+            , "    recompute ahead_ids"
+            , "    reads router_logits f32"
+            , "    reads ahead_logits f32"
+            , "    stores route_ids u32"
+            , "    stores route_weights f32"
+            , "    stores ahead_ids u32"
+            , "  step s2_gemv"
+            , "    anchor experts_out"
+            , "    reads x f32"
+            , "    reads route_ids u32"
+            , "    stores experts_out f32"
+            , "  step s3_experts_sum"
+            , "    recompute experts_sum"
+            , "    reads route_weights f32"
+            , "    reads experts_out f32"
+            , "    stores experts_sum f32"
+            ]
     , testCase "the head: softcap on the tiles, argmax a light step after them" $
         fmap (T.lines . renderPlan . plan defaultPlanOptions) (checkProgram headProgram)
           @?= Right
@@ -544,6 +573,7 @@ planned =
   , attnNormed
   , attnMixed
   , attnKept
+  , predicting
   ]
 
 -- | Every set of the planner's options.
@@ -616,6 +646,24 @@ attnKept = attending "attn_kept" $ \o -> do
   slot <- rowInts "o_slot" 1 2
   kvStore "store_o" StoreAt {storeCache = c, storePositions = pos, storeSequences = slot} o
   output "out" out
+
+{- | Experts of a route, and a second route the engine reads: a prediction,
+say, of a later layer's experts.
+-}
+predicting :: Program
+predicting = program "predicting" $ do
+  x <- input "x" (wholeRow 32) TF32
+  router <- weight "router_proj" [8, 32]
+  ahead <- weight "ahead_proj" [8, 32]
+  experts <- table "experts" 8 [16, 32]
+  logits <- linear "router_logits" router 0 x
+  aheadLogits <- linear "ahead_logits" ahead 0 x
+  (ids, ws) <- route "route" 2 Nothing logits
+  (aheadIds, _) <- route "ahead" 2 Nothing aheadLogits
+  y <- linearRouted "experts_out" experts ids x
+  s <- combineRanks "experts_sum" ws y
+  output "y" s
+  output "ahead" aheadIds
 
 -- | Tokens to the residual stream, scaled.
 embedProgram :: Program

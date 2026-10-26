@@ -218,7 +218,9 @@ data PlanOptions = PlanOptions
   -- ^ Independent anchors of one family share a step.
   , optGated :: Bool
   {- ^ Routed layers wait for their route: the engine fetches experts in
-  between, so the route's ids are stored by an earlier step.
+  between, so the route's ids are stored by an earlier step. So are the
+  ids of routes the program outputs, which the engine reads then too: a
+  prediction of a later layer's experts, say.
   -}
   }
   deriving stock (Eq, Show)
@@ -516,8 +518,9 @@ plan opts checked = Plan p (map finish (toList final.closed))
         let c = maximum (nodeCost p op : costs)
         mapM_ (`setAvail` AVirtual c) n.nodeOutputs
         -- Gated, a route is stored as soon as it can be, so that the engine
-        -- fetches its experts while the steps before them run.
-        when (opts.optGated && feedsRouted n) $ do
+        -- fetches its experts while the steps before them run; and so is a
+        -- route the engine reads, which the program outputs.
+        when (opts.optGated && (feedsRouted n || output n)) $ do
           early <- or <$> traverse touchesOpen ins
           when early closeOpen
           mapM_ materialize (take 1 n.nodeOutputs)
@@ -529,6 +532,12 @@ plan opts checked = Plan p (map finish (toList final.closed))
         , v <- take 1 r.nodeOutputs
         , c <- Map.findWithDefault [] v consumers
         , LinearRouted _ ids _ <- [opOf c]
+        ]
+    output r =
+      or
+        [ v `Set.member` outputValues
+        | Route {} <- [r.nodeOp]
+        , v <- take 1 r.nodeOutputs
         ]
     isVirtual = \case
       AVirtual _ -> True
