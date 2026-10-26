@@ -25,11 +25,46 @@ v0.1 lives on the branches `initial_version` and `megakernel_lowering`. It
 was a schedule IR, not a kernel language, and is research material: read it
 for ideas, don't copy its conventions blindly, and never merge or tag it.
 
+## Commands
+
+```sh
+nix develop
+nix fmt
+nix flake check --all-systems --no-update-lock-file
+```
+
+`nix flake check` evaluates every system but builds only the current
+system's checks. The per-commit gate builds them for all systems; on a Mac
+the Linux ones go to its remote builder. Flakes only see files git tracks,
+so `git add` new files first:
+
+```sh
+nix fmt && git diff --exit-code &&
+  nix flake check --all-systems --no-update-lock-file &&
+  (
+    for s in x86_64-linux aarch64-linux aarch64-darwin; do
+      nix build --no-link --impure --expr \
+        "builtins.attrValues (builtins.getFlake \"git+file://$PWD\").checks.$s" || exit 1
+    done
+  )
+```
+
+## Architecture
+
+- `flake.nix`: flake-parts on nixos-26.05; systems x86_64-linux,
+  aarch64-linux and aarch64-darwin.
+- `nix/`: `checks.nix` (`reuse lint`), `devshell.nix` and `treefmt.nix`
+  (`nix fmt` and `checks.treefmt`).
+- `.gitlab-ci.yml`: GitLab CI on x86_64-linux runners. `publish-github`, on
+  master, pushes master to the public GitHub repository.
+
 ## Conventions
 
 - Every file has SPDX copyright and license comments
   (`2026 Mika Tammi`, `BSD-3-Clause`). Files that can't hold comments are
   annotated in `REUSE.toml`.
+- Every file type has a formatter in `nix/treefmt.nix`, enabled in the
+  commit that adds the first file of that type.
 - Nothing host-specific in the repository: no hostnames, absolute paths of
   anyone's machine, or names of private repositories and services. master
   is mirrored to a public GitHub repository in full.
@@ -43,6 +78,8 @@ for ideas, don't copy its conventions blindly, and never merge or tag it.
 - Commit with `git commit -s`, and with an `Assisted-by:` trailer naming
   the AI assistant that helped, such as `Assisted-by: Claude Opus 5.5`,
   directly above the Signed-off-by. No other trailers.
+- `flake.lock` changes only together with the input change that needs them.
+- Every commit passes the per-commit gate (see Commands).
 - Corrections to earlier commits go in as `git commit --fixup=<commit>` (or
   `--squash`) and are autosquashed before the merge request.
 - v0.2 work happens on `initialv02` and reaches master through merge
@@ -51,6 +88,8 @@ for ideas, don't copy its conventions blindly, and never merge or tag it.
 
 ## Common mistakes to avoid
 
+- `path:` flake inputs, or `flake.lock` updates riding along in unrelated
+  commits.
 - Committing `HANDOFF.md` or other session notes.
 - Writing SPDX tag names followed by a colon in prose: `reuse lint` parses
   them anywhere in a file.
