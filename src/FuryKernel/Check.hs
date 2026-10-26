@@ -44,6 +44,7 @@ module FuryKernel.Check (
   checkedIR,
   check,
   checkIR,
+  nameProblem,
   reservedNames,
 ) where
 
@@ -144,7 +145,7 @@ reservedNames =
 
 checkNames :: IR.Kernel -> [Finding]
 checkNames k =
-  [Finding Names m | Just m <- map invalid allNames]
+  [Finding Names m | Just m <- map nameProblem allNames]
     <> [ Finding Names ("The name " <> n <> " is declared " <> T.pack (show c) <> " times.")
        | (n, c) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | n <- allNames])
        , c > 1
@@ -164,22 +165,29 @@ checkNames k =
     SIf _ _ th el -> concatMap bound th <> concatMap bound el
     SFor _ v _ _ _ body -> v : concatMap bound body
     _ -> []
-  invalid n
-    | T.null n = Just "An empty name."
-    | not (identStart (T.head n) && T.all identChar n) =
-        Just ("The name " <> n <> " is not an identifier: use letters, digits and underscores.")
-    | "_" `T.isPrefixOf` n = Just ("The name " <> n <> " starts with an underscore, which C++ reserves.")
-    | "__" `T.isInfixOf` n = Just ("The name " <> n <> " holds two underscores in a row, which C++ reserves.")
-    | "fk_" `T.isPrefixOf` T.toLower n = Just ("The name " <> n <> " starts with fk_ in some case, which generated code reserves.")
-    | n `Set.member` reservedNames || vectorType n =
-        Just ("The name " <> n <> " is reserved in a target language.")
-    | otherwise = Nothing
+
+{- | What is wrong with a name in generated code, if anything: it must be an
+identifier of every target language, not reserved by one, not start with
+an underscore or with @fk_@, and not hold two underscores in a row.
+-}
+nameProblem :: Name -> Maybe Text
+nameProblem n
+  | T.null n = Just "An empty name."
+  | not (identStart (T.head n) && T.all identChar n) =
+      Just ("The name " <> n <> " is not an identifier: use letters, digits and underscores.")
+  | "_" `T.isPrefixOf` n = Just ("The name " <> n <> " starts with an underscore, which C++ reserves.")
+  | "__" `T.isInfixOf` n = Just ("The name " <> n <> " holds two underscores in a row, which C++ reserves.")
+  | "fk_" `T.isPrefixOf` T.toLower n = Just ("The name " <> n <> " starts with fk_ in some case, which generated code reserves.")
+  | n `Set.member` reservedNames || vectorType n =
+      Just ("The name " <> n <> " is reserved in a target language.")
+  | otherwise = Nothing
+ where
   identStart c = isAsciiLower c || isAsciiUpper c || c == '_'
   identChar c = identStart c || isDigit c
   -- float4, uint2, half3x3 and the like.
-  vectorType n =
+  vectorType name =
     any
-      (\base -> maybe False shape (T.stripPrefix base n))
+      (\base -> maybe False shape (T.stripPrefix base name))
       ["float", "half", "bfloat", "double", "int", "uint", "short", "ushort", "char", "uchar", "long", "ulong", "bool"]
   shape s = case T.unpack s of
     [a] -> a `elem` ("234" :: String)

@@ -52,6 +52,18 @@ data Rule
     only where every lane does.
     -}
     Regions
+  | {- | Programs: sources, values and nodes of unique ids, increasing in
+    program order, and every value made by one node.
+    -}
+    Structure
+  | {- | Programs: every operation's values and sources of the shapes and
+    types it takes, and in order.
+    -}
+    Shapes
+  | {- | Programs: every index below the size of what it indexes: routed
+    ids, tokens, slots, blocks and positions.
+    -}
+    Bounds
   | -- | The kernel checked for the target it was built for.
     Target
   | {- | Overrides: the ABI of the kernel they replace, together every legal

@@ -202,6 +202,43 @@ nix fmt && git diff --exit-code &&
     combine with their own types.
     The gate keeps launch sizes in u32 at every step, so their u64 agrees
     with the interpreter's u32 for dimensions in their ranges.
+  - `FuryKernel.Program`: the program layer, what a model computes in one
+    step. `.Graph`: straight-line dataflow over row values (each of a
+    step's m rows one token, its elements in segments such as heads or an
+    expert's ranks), made by a small vocabulary of operations (linear
+    layers, plain or routed through a table of weights; RMSNorm; rotary
+    embeddings; routing; stores into KV caches and attention over them,
+    ring or paged; gathers; elementwise work) from sources: per-row
+    activations and integers (each below a bound), weights, tables,
+    caches. A store names its cache and its rows' positions and sequences,
+    and an attention its keys, values, positions and sequences, by field
+    (`StoreAt`, `AttendTo`); RoPE's pairs, GELU's form and a route's
+    weights are parameters, with one value each so far (`RopeHalves`,
+    `GeluTanh`, `SoftmaxOfTopK`). `.Build` writes programs, sources named
+    exactly as given, as the engine binds them. `.Check` is their gate
+    (`CheckedProgram`: ids
+    unique and increasing in program order, every value made by one
+    node and every cache stored into by one, rows and caches of at least
+    one element, each index below what it indexes, attention over a ring
+    reading no more positions than it holds). `.Eval` gives them
+    their meaning in f64, rounding only where a cache stores bf16. Caches
+    are bound sparsely, by the slots of a ring or the blocks of a paged
+    pool a step uses (a pool's blocks each an array of its own, reached
+    through a table of their addresses); it refuses a binding of another
+    size than its source declares, and a read or store of a slot or block
+    not bound: over a checked program it returns, never throws. `.Plan`
+    turns a checked program into steps, one kernel launch each: anchors
+    (linear layers, attention) set a step's grid; other operations are
+    recomputed in every threadgroup from stored values, or run on a linear
+    layer's tiles (attention's hold partials, which only its combine
+    reads); a cut comes where an operation needs what several
+    threadgroups of a step made; light steps hold stores into caches,
+    attention's combine (once: its step stores what later steps read
+    and makes the outputs that need nothing more) and the outputs no
+    anchor computes. A placement
+    never changes a value's arithmetic, only where it runs.
+    A combine step names no cache, and `nodeCost` what recomputing an
+    operation costs, as the planner counts it.
   - `FuryKernel`: what a kernel author imports.
 - `test/`: the test suite, tasty with hedgehog properties, all from one
   seed unless `--hedgehog-replay` gives another. Conversions are
@@ -225,6 +262,10 @@ nix fmt && git diff --exit-code &&
   for bit where f32 sums are exact and within the bound of f32
   accumulation elsewhere, a row's bits the same for every m, place in the
   batch, rows per SIMD group and thread count.
+  Programs: the gate, the evaluator on small cases (caches bound sparsely,
+  a paged pool of 2^33 elements by two of its blocks), and the planner's
+  steps for a mixture-of-experts decoder layer, a head and an embedding,
+  against golden text.
   `test/no-compile/`: programs static mode must reject, each at one
   place, with the message it must reject them with on its one
   `-- EXPECT:` line.

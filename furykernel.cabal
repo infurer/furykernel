@@ -60,6 +60,12 @@ library
     FuryKernel.Json
     FuryKernel.Manifest
     FuryKernel.Numerics
+    FuryKernel.Program
+    FuryKernel.Program.Build
+    FuryKernel.Program.Check
+    FuryKernel.Program.Eval
+    FuryKernel.Program.Graph
+    FuryKernel.Program.Plan
     FuryKernel.Reduce
     FuryKernel.Selection
     FuryKernel.Target
@@ -91,6 +97,8 @@ test-suite furykernel-test
     Test.FuryKernel.JsonTest
     Test.FuryKernel.Kernels
     Test.FuryKernel.NumericsTest
+    Test.FuryKernel.PlanCheck
+    Test.FuryKernel.ProgramTest
     Test.FuryKernel.ReduceTest
     Test.FuryKernel.Run
     Test.FuryKernel.SelectionTest

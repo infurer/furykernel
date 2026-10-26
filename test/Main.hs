@@ -15,6 +15,7 @@ import Test.FuryKernel.GemvTest qualified as GemvTest
 import Test.FuryKernel.InterpTest qualified as InterpTest
 import Test.FuryKernel.JsonTest qualified as JsonTest
 import Test.FuryKernel.NumericsTest qualified as NumericsTest
+import Test.FuryKernel.ProgramTest qualified as ProgramTest
 import Test.FuryKernel.ReduceTest qualified as ReduceTest
 import Test.FuryKernel.SelectionTest qualified as SelectionTest
 import Test.FuryKernel.VariantTest qualified as VariantTest
@@ -42,4 +43,5 @@ main =
       , AbiTest.tests
       , EmitRustTest.tests
       , JsonTest.tests
+      , ProgramTest.tests
       ]
