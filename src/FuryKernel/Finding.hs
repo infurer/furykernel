@@ -37,12 +37,19 @@ data Rule
     Names
   | -- | Well-typed expressions and statements.
     Typing
+  | {- | Launch sizes: every dimension with legal values, and the grid and
+    the buffers' extents in u32 at every step, dividing by no zero, for
+    every legal value of their dimensions.
+    -}
+    LaunchSizes
   | -- | Conditions and loop bounds as uniform as their constructs require.
     Uniformity
   | {- | Barriers only where every thread arrives, SIMD-group operations
     only where every lane does.
     -}
     Regions
+  | -- | The kernel checked for the target it was built for.
+    Target
   deriving stock (Eq, Ord, Show, Enum, Bounded)
 
 data Finding = MkFinding

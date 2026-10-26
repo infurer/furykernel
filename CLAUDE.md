@@ -111,6 +111,31 @@ nix fmt && git diff --exit-code &&
     (`AllThreads`), SIMD-group operations every lane (`Converged`), loads
     and stores the right access; each refusal has its own message.
     Locals are named by the author (`let_`, `var`) and stay named.
+  - `FuryKernel.Check`: the gate. `check` returns a `Checked` kernel, whose
+    constructor is private, or the findings; backends take only `Checked`
+    kernels. A kernel keeps the caps of the target it was built for, and
+    the gate refuses it for any other; `Checked`, `Kernel` and the builder's
+    indexed types are nominal in their parameters, and a kernel's fields
+    are read by functions, so neither `coerce` nor a record update changes
+    a target, region, access or type. It re-checks the IR whatever built
+    it: names, typing, a
+    divergence analysis that verifies every declared uniform condition and
+    loop bound (a threadgroup load as uniform as its index where no store
+    to its array can run in its barrier epoch, every side of every if and
+    pass of every loop counted, as a reduction's result is; any other
+    divergent), the regions of barriers and SIMD-group operations, and the
+    resources.
+    A finding carries its place (`findingLocation`): its kernel, and the
+    ifs and loops around what it is about.
+  - `FuryKernel.Check.Launch`: launch sizes over the dimensions' legal
+    values, the multiples of each one's divisor in its range that a u32
+    holds. The gate refuses a dimension without any, and a grid or extent
+    that leaves u32 at some step or divides by zero for some of them:
+    interval arithmetic bounds each step over a box of legal values, a box
+    it leaves open is split in two down to single points, where it is exact,
+    and a refusal names the values that break it (or the boxes, 4096 of
+    them, that could not settle it). The same search gives a grid's fewest
+    threadgroups (`lowest`).
 - `test/`: the test suite, tasty with hedgehog properties, all from one
   seed unless `--hedgehog-replay` gives another. Conversions are
   checked exhaustively where the domain is 16 bits wide, and otherwise

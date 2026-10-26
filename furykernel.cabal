@@ -48,6 +48,8 @@ library
   exposed-modules:
     FuryKernel
     FuryKernel.Build
+    FuryKernel.Check
+    FuryKernel.Check.Launch
     FuryKernel.Constraint
     FuryKernel.Finding
     FuryKernel.IR
@@ -68,6 +70,7 @@ test-suite furykernel-test
   main-is: Main.hs
   other-modules:
     Test.FuryKernel.BuildTest
+    Test.FuryKernel.CheckTest
     Test.FuryKernel.ConstraintTest
     Test.FuryKernel.Kernels
     Test.FuryKernel.NumericsTest

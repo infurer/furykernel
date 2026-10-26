@@ -7,6 +7,7 @@ import Control.Applicative ((<|>))
 import Hedgehog.Internal.Property (Skip (SkipNothing))
 import Hedgehog.Internal.Seed qualified as Seed
 import Test.FuryKernel.BuildTest qualified as BuildTest
+import Test.FuryKernel.CheckTest qualified as CheckTest
 import Test.FuryKernel.ConstraintTest qualified as ConstraintTest
 import Test.FuryKernel.NumericsTest qualified as NumericsTest
 import Test.Tasty (adjustOption, defaultMain, testGroup)
@@ -24,4 +25,5 @@ main =
       [ NumericsTest.tests
       , ConstraintTest.tests
       , BuildTest.tests
+      , CheckTest.tests
       ]

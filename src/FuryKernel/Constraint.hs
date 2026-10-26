@@ -40,6 +40,7 @@ module FuryKernel.Constraint (
   TgArrayWithin,
   RoundUp,
   checkTgArray,
+  checkTgArrayOf,
   withTgArray,
 
   -- * Alignments of arrays in device memory
@@ -136,6 +137,8 @@ instance
   ThreadsOk t n
 
 checkThreads :: TargetCaps -> Natural -> [Finding]
+checkThreads caps _
+  | caps.capSimdWidth == 0 = [Finding Target (caps.capName <> "'s SIMD groups have no lanes.")]
 checkThreads caps n =
   [ Finding Threads msg
   | (False, msg) <-
@@ -219,7 +222,11 @@ instance
   TgArrayOk t n a
 
 checkTgArray :: forall a. (IsScalar a) => TargetCaps -> Natural -> [Finding]
-checkTgArray caps n =
+checkTgArray caps = checkTgArrayOf caps (scalarType @a)
+
+-- | 'checkTgArray' for an element type known as a term.
+checkTgArrayOf :: TargetCaps -> ScalarType -> Natural -> [Finding]
+checkTgArrayOf caps t n =
   [ Finding ThreadgroupMemory msg
   | (False, msg) <-
       [ (n >= 1, "A threadgroup array needs at least one element.")
@@ -244,9 +251,9 @@ checkTgArray caps n =
       ]
   ]
  where
-  size = fromIntegral (scalarSize (scalarType @a)) :: Natural
+  size = fromIntegral (scalarSize t) :: Natural
   bytes = n * size
-  align = leastAlign (scalarType @a)
+  align = leastAlign t
   taken = (bytes + align - 1) `div` align * align
 
 -- | Dynamic mode: run static-mode code for an array size known at run time.
