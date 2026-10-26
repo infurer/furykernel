@@ -223,6 +223,7 @@ withParams ps =
     , kernelGroups = ELit (LU32 1)
     , kernelParams = [Param n t Scalar | (n, t) <- ps]
     , kernelBuffers = []
+    , kernelTables = []
     , kernelTgArrays = []
     , kernelBody = []
     }

@@ -27,7 +27,7 @@ manifestFormat = "furykernel-manifest"
 
 kernelManifest :: forall t. (Target t) => Checked t -> Json
 kernelManifest c =
-  JObject
+  JObject $
     [ ("format", JString manifestFormat)
     , ("version", JInt 1)
     , ("target", JString (targetCaps @t).capName)
@@ -37,13 +37,24 @@ kernelManifest c =
     , ("threads", JInt (toInteger k.kernelThreads))
     , ("groups", JString (renderExpr k.kernelGroups))
     , ("buffers", JArray (map buffer abi.abiBuffers))
-    , ("params", JArray (map field abi.abiParams))
-    , ("params_size", JInt (toInteger abi.abiParamsSize))
-    , ("threadgroup_memory", JInt (toInteger (snd (tgLayout k.kernelTgArrays))))
     ]
+      -- Only kernels with tables say so, so that the others read as before.
+      <> [("tables", JArray (map table abi.abiTables)) | not (null abi.abiTables)]
+      <> [ ("params", JArray (map field abi.abiParams))
+         , ("params_size", JInt (toInteger abi.abiParamsSize))
+         , ("threadgroup_memory", JInt (toInteger (snd (tgLayout k.kernelTgArrays))))
+         ]
  where
   k = checkedIR c
   abi = abiOf k
+  table t =
+    JObject
+      [ ("name", JString t.tableBindingName)
+      , ("type", JString (scalarTypeName t.tableBindingType))
+      , ("align", JInt (toInteger t.tableBindingAlign))
+      , ("entries", JString (renderExpr t.tableBindingEntries))
+      , ("extent", JString (renderExpr t.tableBindingExtent))
+      ]
   buffer b =
     JObject
       [ ("name", JString b.bindingName)

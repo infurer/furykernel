@@ -36,6 +36,7 @@ module FuryKernel.IR (
   ParamRole (..),
   Param (..),
   Buffer (..),
+  Table (..),
   TgArray (..),
   tgAlign,
   tgBytes,
@@ -241,6 +242,8 @@ data Expr
     ENarrowInt Overflow ScalarType Expr
   | -- | An element of a device buffer.
     ELoad Name Expr
+  | -- | An element of the array a table's entry points at: table, entry, index.
+    ELoadVia Name Expr Expr
   | -- | An element of a threadgroup array.
     ETgLoad Name Expr
   deriving stock (Eq, Show)
@@ -286,6 +289,10 @@ data Stmt
     SLoadPack [Name] ScalarType Name Expr
   | -- | Buffer, index in packs, the values: a pack written at once.
     SStorePack Name Expr [Expr]
+  | {- | Locals bound to a pack read through a table: the locals, their
+    type, the table, the entry and the index in packs.
+    -}
+    SLoadPackVia [Name] ScalarType Name Expr Expr
   | -- | The declared uniformity of the condition, the condition, then, else.
     SIf Region Expr [Stmt] [Stmt]
   | {- | The declared uniformity of the loop's control, the loop variable
@@ -340,6 +347,23 @@ data Buffer = Buffer
   }
   deriving stock (Eq, Show)
 
+{- | A table of device addresses, which the kernel only reads through: entry
+@e@ is the start of an array of @tableExtent@ elements of @tableType@,
+aligned to @tableAlign@ bytes. The table itself holds @tableEntries@
+64-bit addresses. Experts' weights are reached this way, wherever the
+engine keeps them.
+-}
+data Table = Table
+  { tableName :: Name
+  , tableType :: ScalarType
+  , tableAlign :: Natural
+  , tableEntries :: Expr
+  -- ^ Entries in the table, over the parameters.
+  , tableExtent :: Expr
+  -- ^ Elements of each entry's array the kernel may touch.
+  }
+  deriving stock (Eq, Show)
+
 {- | An array in threadgroup memory, aligned to 'tgAlign' and taking
 'tgBytes' of it in the kernel's layout ('tgLayout').
 -}
@@ -382,6 +406,8 @@ data Kernel = Kernel
   -- ^ Threadgroups in the grid, over the parameters.
   , kernelParams :: [Param]
   , kernelBuffers :: [Buffer]
+  , kernelTables :: [Table]
+  -- ^ Bound after the buffers.
   , kernelTgArrays :: [TgArray]
   , kernelBody :: [Stmt]
   }
@@ -403,6 +429,7 @@ renderKernel k =
     ]
       <> map param k.kernelParams
       <> map buffer k.kernelBuffers
+      <> map table k.kernelTables
       <> map tgArray k.kernelTgArrays
       <> ["{"]
       <> concatMap (stmt 1) k.kernelBody
@@ -427,6 +454,17 @@ renderKernel k =
     ReadOnly -> "read"
     WriteOnly -> "write"
     ReadWrite -> "read_write"
+  table t =
+    "  table "
+      <> t.tableName
+      <> " : "
+      <> renderExpr t.tableEntries
+      <> " x "
+      <> scalarTypeName t.tableType
+      <> "["
+      <> renderExpr t.tableExtent
+      <> "] align "
+      <> showT t.tableAlign
   tgArray a = "  threadgroup " <> a.tgName <> " : " <> scalarTypeName a.tgType <> "[" <> showT a.tgCount <> "]"
 
 stmt :: Int -> Stmt -> [Text]
@@ -452,6 +490,22 @@ stmt depth = \case
     ]
   SStorePack b i es ->
     [pad <> b <> ".pack" <> showT (length es) <> "[" <> renderExpr i <> "] = (" <> T.intercalate ", " (map renderExpr es) <> ")"]
+  SLoadPackVia ns t b e i ->
+    [ pad
+        <> "let ("
+        <> T.intercalate ", " ns
+        <> ") : "
+        <> scalarTypeName t
+        <> " = "
+        <> b
+        <> "["
+        <> renderExpr e
+        <> "].pack"
+        <> showT (length ns)
+        <> "["
+        <> renderExpr i
+        <> "]"
+    ]
   SIf r c th el ->
     [pad <> "if " <> region r <> " " <> renderExpr c <> " {"]
       <> concatMap (stmt (depth + 1)) th
@@ -507,6 +561,7 @@ renderExpr = \case
   EConvert t e -> scalarTypeName t <> "(" <> renderExpr e <> ")"
   ENarrowInt o t e -> scalarTypeName t <> (case o of Clamp -> "_clamped("; Wrap -> "_wrapped(") <> renderExpr e <> ")"
   ELoad n i -> n <> "[" <> renderExpr i <> "]"
+  ELoadVia n e i -> n <> "[" <> renderExpr e <> "][" <> renderExpr i <> "]"
   ETgLoad n i -> n <> "[" <> renderExpr i <> "]"
  where
   binOp = \case

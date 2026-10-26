@@ -83,6 +83,20 @@ tests =
             , "  let h : f16 = f16:0x3c01"
             , "}"
             ]
+    , testCase "a table renders as its IR" $
+        renderKernel (kernelIR viaTable)
+          @?= T.unlines
+            [ "ir 1"
+            , "kernel via_table threads 32 simd 32 groups 1u"
+            , "  param e : u32"
+            , "  buffer y : write f32[8u] align 16"
+            , "  table arrays : 4u x f32[8u] align 16"
+            , "{"
+            , "  if divergent (@thread < 8u) {"
+            , "    y[@thread] = arrays[$e][@thread]"
+            , "  }"
+            , "}"
+            ]
     , testCase "a pack stored with the wrong number of values" $
         kernelProblems short @?= [Finding Typing "A pack of 4 stored to y with 3 values."]
     , testCase "an integer narrowing renders with what it does out of range" $
@@ -154,6 +168,16 @@ controlled = kernel "controlled" $ do
       whenLane (simdLane .== 0) $ tgStore partial simdGroupIndex s
       barrier
       whenLane (threadIndex .< 2) $ store y threadIndex (tgLoad partial threadIndex)
+
+-- | Eight elements through a table of addresses, from the entry a parameter names.
+viaTable :: Kernel T32
+viaTable = kernel "via_table" $ do
+  e <- param @Word32 "e"
+  arrays <- table @16 @Float "arrays" 4 8
+  y <- buffer @WriteOnly @16 @Float "y" 8
+  threads @32
+  groups 1
+  pure . pure $ whenLane (threadIndex .< 8) $ store y threadIndex (loadVia arrays e threadIndex)
 
 {- | A NaN whatever the host makes of 0 / 0, and 1 + 2^-11 + 2^-30, which
 rounding through binary32 would make 1.

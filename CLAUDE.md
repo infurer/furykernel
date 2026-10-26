@@ -98,7 +98,10 @@ nix fmt && git diff --exit-code &&
     operation that returns an operand may return it unflushed. binary16
     keeps its subnormals, and so do the interpreter and the CPU target.
     Statements record the region the builder declared (uniform,
-    SIMD-uniform, divergent); the gate verifies the declarations.
+    SIMD-uniform, divergent); the gate verifies the declarations. Tables
+    of device addresses, bound after the buffers, are read through: each
+    entry the start of an array (an expert's weights), wherever the
+    runtime keeps it.
     Threadgroup arrays lie in the kernel's layout (`tgLayout`): each aligned
     to 16 B, or its element size if larger, and taking its size rounded up
     to that; targets allocate the total.
@@ -113,7 +116,8 @@ nix fmt && git diff --exit-code &&
     Locals are named by the author (`let_`, `var`) and stay named.
     Buffers carry their target, for the pack rule: `loadPack` and
     `storePack` move a `Pack` of consecutive elements at once, indexed in
-    packs, so a pack is aligned whenever its buffer is.
+    packs, so a pack is aligned whenever its buffer is. `table` declares a
+    table, `loadVia` and `loadPackVia` read through one.
   - `FuryKernel.Check`: the gate. `check` returns a `Checked` kernel, whose
     constructor is private, or the findings; backends take only `Checked`
     kernels. A kernel keeps the caps of the target it was built for, and
@@ -132,13 +136,13 @@ nix fmt && git diff --exit-code &&
     ifs and loops around what it is about.
   - `FuryKernel.Check.Launch`: launch sizes over the dimensions' legal
     values, the multiples of each one's divisor in its range that a u32
-    holds. The gate refuses a dimension without any, and a grid or extent
-    that leaves u32 at some step or divides by zero for some of them:
-    interval arithmetic bounds each step over a box of legal values, a box
-    it leaves open is split in two down to single points, where it is exact,
-    and a refusal names the values that break it (or the boxes, 4096 of
-    them, that could not settle it). The same search gives a grid's fewest
-    threadgroups (`lowest`) and shows one size no larger than another
+    holds. The gate refuses a dimension without any, and a grid, extent or
+    table size that leaves u32 at some step or divides by zero for some of
+    them: interval arithmetic bounds each step over a box of legal values, a
+    box it leaves open is split in two down to single points, where it is
+    exact, and a refusal names the values that break it (or the boxes, 4096
+    of them, that could not settle it). The same search gives a grid's
+    fewest threadgroups (`lowest`) and shows one size no larger than another
     (`noLarger`, after polynomial normal forms).
   - `FuryKernel.Interp`: the SIMT interpreter, the reference the kernels'
     specifications are checked with. Lanes run in lockstep with active
@@ -168,11 +172,11 @@ nix fmt && git diff --exit-code &&
     kernel in JSON (format `furykernel-manifest`, version 1, with the
     target it was checked for; `FuryKernel.Json`: deterministic writing,
     and reading of integer-only JSON with unique keys).
-    The launch contract (ranges and extents) is outside the hash:
-    `checkOverrides` lets overrides replace a kernel when each has its ABI
-    and its dimensions as dimensions, together they take every legal value
-    of them, and where one takes the kernel's values its extents are no
-    larger.
+    The launch contract (ranges, extents, tables' sizes) is outside the
+    hash: `checkOverrides` lets overrides replace a kernel when each has its
+    ABI and its dimensions as dimensions, together they take every legal
+    value of them, and where one takes the kernel's values its extents and
+    tables' sizes are no larger.
   - `FuryKernel.Variant`: variant spaces. A family declares its axes (the
     choices that change how its kernels compute, as rows, threads, pack
     width and split-K; marked when they decide a reduction's order), its
@@ -255,7 +259,7 @@ nix fmt && git diff --exit-code &&
   maximum up to what the IR leaves to a target, compared by class; a
   threadgroup sum of -0s is -0.
   The IR's text, golden, for straight lines, packs, an if, a SIMD-group sum
-  and threadgroup memory; one kernel's IR and ABI hashes pinned.
+  and threadgroup memory, and tables; one kernel's IR and ABI hashes pinned.
   Kernels run on the interpreter against f64 specifications: an RMSNorm
   within one bf16 ulp on every SIMD width, and bitwise batch-invariant; a
   bf16 GEMV family with packs and split-K (`Test.FuryKernel.Gemv`), bit

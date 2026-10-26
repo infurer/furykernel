@@ -81,7 +81,7 @@ data LoweredKernel = LoweredKernel
   , lkThreads :: Natural
   , lkGroups :: Expr
   , lkBindings :: [(Name, Natural)]
-  -- ^ The binding index of every buffer, by name.
+  -- ^ The binding index of every buffer, then every table, by name.
   , lkParamsBinding :: Maybe Natural
   -- ^ The binding index of the parameter struct, if the kernel has one.
   , lkTgMemory :: Natural

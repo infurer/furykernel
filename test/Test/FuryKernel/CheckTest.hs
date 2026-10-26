@@ -233,15 +233,17 @@ tests =
           )
           @?= [Buffers]
     , testCase "alignments: a power of two, at least 16 B and the element size" $ do
-        let aligned buffers = map (.findingMessage) (checkIR (targetCaps @T32) (base []) {kernelBuffers = buffers})
+        let aligned buffers tables = map (.findingMessage) (checkIR (targetCaps @T32) (base []) {kernelBuffers = buffers, kernelTables = tables})
             buf n t align = Buffer n ReadOnly t align (ELit (LU32 64))
-        aligned [buf "a" TF32 16, buf "b" TU8 32, buf "c" TBF16 4096] @?= []
-        aligned [buf "a" TF32 0, buf "b" TF32 8, buf "c" TBF16 24, buf "d" TU8 1]
+            tab n t align = Table n t align (ELit (LU32 4)) (ELit (LU32 64))
+        aligned [buf "a" TF32 16, buf "b" TU8 32, buf "c" TBF16 4096] [tab "t" TBF16 16] @?= []
+        aligned [buf "a" TF32 0, buf "b" TF32 8, buf "c" TBF16 24, buf "d" TU8 1] [tab "t" TBF16 4]
           @?= [ "Buffer a: an alignment of 0 B, which is not a power of two."
               , "Buffer a: an alignment of 0 B for elements of 4 B; the least is 16 B."
               , "Buffer b: an alignment of 8 B for elements of 4 B; the least is 16 B."
               , "Buffer c: an alignment of 24 B, which is not a power of two."
               , "Buffer d: an alignment of 1 B for elements of 1 B; the least is 16 B."
+              , "Table t: an alignment of 4 B for elements of 2 B; the least is 16 B."
               ]
     , testCase "threadgroup memory: each array 16-aligned, the total within the limit" $ do
         let arrays as = checkIR (targetCaps @T32) (base []) {kernelTgArrays = [TgArray n TF32 c | (n, c) <- as]}
@@ -342,6 +344,12 @@ tests =
             , kernelBuffers = [b {bufExtent = dimN .*. dimN .*. dimN} | b <- (base []).kernelBuffers]
             }
           @?= ["The extent of out, n * n * n, leaves u32 at n = 1626: n * n * n is 4298942376."]
+        messages
+          (base [])
+            { kernelParams = [Param "m" TU32 (Dim (DimRange 1 16 1)), Param "n" TU32 (Dim (DimRange 1 16 1))]
+            , kernelTables = [Table "t" TF32 16 (dimM .-. dimN) (lu 4)]
+            }
+          @?= ["The number of entries of table t, m - n, leaves u32 at m = 1, n = 2: m - n is -1."]
     , testCase "launch sizes: from the least legal value up, exact where a dimension occurs twice" $ do
         grid (DimRange 1 4096 64) (dimN ./. lu 64 .-. lu 1) @?= []
         grid (DimRange 1 65536 1) (dimN .-. dimN ./. lu 2) @?= []
@@ -362,6 +370,7 @@ base body =
     , kernelGroups = ELit (LU32 1)
     , kernelParams = []
     , kernelBuffers = [Buffer "out" ReadWrite TF32 16 (ELit (LU32 64))]
+    , kernelTables = []
     , kernelTgArrays = []
     , kernelBody = body
     }
@@ -390,7 +399,8 @@ epochOf body = messages (base body) {kernelTgArrays = [TgArray "t" TF32 64]}
 grid :: DimRange -> Expr -> [Text]
 grid r g = messages (base []) {kernelParams = [Param "n" TU32 (Dim r)], kernelGroups = g}
 
-dimN :: Expr
+dimM, dimN :: Expr
+dimM = EParam "m"
 dimN = EParam "n"
 
 (.+.), (.-.), (.*.), (./.), (.%.) :: Expr -> Expr -> Expr

@@ -9,9 +9,11 @@ import Data.Bits ((.&.))
 import Data.Int (Int32, Int8)
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
+import Data.Text qualified as T
 import Data.Word (Word16, Word32, Word8)
 import FuryKernel.Build
-import FuryKernel.Constraint (TgArrayOk, ThreadsOk)
+import FuryKernel.Check (check)
+import FuryKernel.Constraint (PackOk, TgArrayOk, ThreadsOk)
 import FuryKernel.IR (DimRange (..), Name)
 import FuryKernel.Interp
 import FuryKernel.Numerics (narrowBF16, narrowF16Double, widenBF16, widenF16)
@@ -85,6 +87,12 @@ tests =
     , testCase "a race shows as results that depend on the seed" $ do
         let outcomes = nub [runOn @T32 racy [] [("y", [VU32 0])] seed | seed <- [1 .. 16]]
         assertBool "more than one outcome" (length outcomes > 1)
+    , testCase "tables: elements and packs of the array an entry points at" $ do
+        let arrays = [[VF32 (fromIntegral (10 * e + i)) | i <- [0 .. 3 :: Int]] | e <- [0 .. 2 :: Int]]
+            launchAt entry = withTables (Map.fromList [("arrays", arrays)]) (launch (Map.fromList [("entry", VU32 entry)]) (Map.fromList [("y", replicate 6 (VF32 0))]))
+            go entry = either (Left . show) (\c -> either (Left . show) Right (run c (launchAt entry))) (check (pick @T32))
+        go 1 @?= Right (Map.fromList [("y", map VF32 [10, 11, 12, 13, 12, 13])])
+        go 3 @?= Left (show (OutOfBounds "arrays" 3 3))
     , testCase "errors instead of undefined behaviour" $ do
         runOn @T32 count [("n", VU32 100)] [("y", replicate 99 (VU32 0))] 0
           @?= Left (ShortBuffer "y" 100 99)
@@ -112,6 +120,14 @@ tests =
         dimmed 12 @?= Left (DimOutOfRange "n" 12 (DimRange 8 64 8))
         dimmed 72 @?= Left (DimOutOfRange "n" 72 (DimRange 8 64 8))
         dimmed 0 @?= Left (DimOutOfRange "n" 0 (DimRange 8 64 8))
+    , testCase "the declared contract: tables to their entries, each entry to its extent" $ do
+        let arrays = [[VF32 (fromIntegral (10 * e + i)) | i <- [0 .. 7 :: Int]] | e <- [0 .. 4 :: Int]]
+            via e i = case check throughTable of
+              Left fs -> Left (Internal (T.pack (show fs)))
+              Right c -> run c (withTables (Map.fromList [("arrays", arrays)]) (launch (Map.fromList [("e", VU32 e), ("i", VU32 i)]) (Map.fromList [("y", [VF32 0])])))
+        via 2 3 @?= Right (Map.fromList [("y", [VF32 23])])
+        via 3 0 @?= Left (OutOfBounds "arrays" 3 3)
+        via 1 4 @?= Left (OutOfBounds "arrays" 4 4)
     , testCase "minimum and maximum: minimumNumber and maximumNumber, up to what the IR leaves to a target" $ do
         let snan = 0x7F800001
             qnan = 0x7FC00001
@@ -138,6 +154,24 @@ tests =
         fmap (\m -> map (`Map.lookup` m) ["clamped_a", "wrapped_a", "clamped_b", "wrapped_b"]) out
           @?= Right [Just (map VI8 [127, -128, -128, 127]), Just (map VI8 [44, -44, 127, 127]), Just (map VU8 [255, 255, 255, 255]), Just (map VU8 [44, 255, 0, 255])]
     ]
+
+{- | Four lanes copy their element of the array an entry of the table points
+at, and the first lane the pack of its elements 2 and 3.
+-}
+pick :: forall t. (Target t, ThreadsOk t 32, PackOk t 2 Float 16) => Kernel t
+pick = kernel "pick" $ do
+  entry <- param @Word32 "entry"
+  arrays <- table @16 @Float "arrays" 3 4
+  y <- buffer @WriteOnly @16 @Float "y" 6
+  threads @32
+  groups 1
+  pure . pure $ do
+    whenLane (threadIndex .< 4) $ store y threadIndex (loadVia arrays entry threadIndex)
+    pair <- loadPackVia @2 "pair" arrays entry 1
+    whenLane (threadIndex .== 0) $
+      case unpack pair of
+        [a, b] -> store y 4 a >> store y 5 b
+        _ -> pure ()
 
 -- | Bit for bit what the kernel's arithmetic says, NaNs included.
 scaleSpec :: Property
@@ -266,6 +300,17 @@ pastExtent i j = kernel "past_extent" $ do
   threads @32
   groups 1
   pure . pure $ whenLane (threadIndex .== 0) (store y (fromIntegral j) (load x (fromIntegral i)))
+
+-- | Element i of the array of entry e, of a table of 3 entries of 4 elements.
+throughTable :: Kernel T32
+throughTable = kernel "through_table" $ do
+  e <- param @Word32 "e"
+  i <- param @Word32 "i"
+  arrays <- table @16 @Float "arrays" 3 4
+  y <- buffer @WriteOnly @16 @Float "y" 1
+  threads @32
+  groups 1
+  pure . pure $ whenLane (threadIndex .== 0) (store y 0 (loadVia arrays e i))
 
 -- | y[i] = i over a dimension of 8 to 64, a multiple of 8.
 eights :: Kernel T32

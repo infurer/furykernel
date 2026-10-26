@@ -42,8 +42,8 @@ data Rule
   | -- | Well-typed expressions and statements.
     Typing
   | {- | Launch sizes: every dimension with legal values, and the grid and
-    the buffers' extents in u32 at every step, dividing by no zero, for
-    every legal value of their dimensions.
+    the buffers' and tables' sizes in u32 at every step, dividing by no
+    zero, for every legal value of their dimensions.
     -}
     LaunchSizes
   | -- | Conditions and loop bounds as uniform as their constructs require.

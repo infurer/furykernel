@@ -5,7 +5,8 @@
 
 A dimension takes the values of its range that are multiples of its
 divisor and that a u32 holds: from the least of them to the greatest, a
-divisor apart. A launch size (the grid or a buffer's extent) is an expression over the
+divisor apart. A launch size (the grid, a buffer's extent, a table's
+entries and the extent of each entry) is an expression over the
 dimensions and u32 literals in @+ - * / %@, which the host computes before
 a launch.
 
@@ -412,6 +413,12 @@ checkLaunchSizes k =
   sizes =
     [(("The grid size " <>), k.kernelGroups)]
       <> [(\t -> "The extent of " <> b.bufName <> ", " <> t <> ",", b.bufExtent) | b <- k.kernelBuffers]
+      <> concat
+        [ [ (\t -> "The number of entries of table " <> t'.tableName <> ", " <> t <> ",", t'.tableEntries)
+          , (\t -> "The extent of each entry of table " <> t'.tableName <> ", " <> t <> ",", t'.tableExtent)
+          ]
+        | t' <- k.kernelTables
+        ]
   problem s = \case
     Holds -> Nothing
     Breaks pt f -> Just (breachText pt f)

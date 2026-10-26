@@ -4,22 +4,25 @@
 {- | The binary interface of a kernel: what generated code on both sides of
 a launch agrees on.
 
-A kernel's ABI is its buffers, in declaration order, and its one parameter
-struct, laid out as C lays out a struct of its fields. Its hash covers
+A kernel's ABI is its buffers, in declaration order, its tables of
+addresses after them, and its one parameter struct, laid out as C lays out
+a struct of its fields. Its hash covers
 names, order, access, types, alignments and offsets: a tuned override of a
 kernel must have the same ABI, and the Rust that runtimes' generators emit
 asserts at compile time that both sides come from the same one. Launch
 geometry (threads, grid) is the backend's choice and outside the hash.
 
-The launch contract (the dimensions' ranges and the extents) is outside
-the hash too: 'checkOverrides' decides whether overrides may replace a
-kernel, their contracts together at least as permissive as its.
+The launch contract (the dimensions' ranges, the extents and the tables'
+sizes) is outside the hash too: 'checkOverrides' decides whether overrides
+may replace a kernel, their contracts together at least as permissive as
+its.
 
 The hashes are FNV-1a over a canonical text, which is simple to recompute
 anywhere and is no security measure.
 -}
 module FuryKernel.Abi (
   Binding (..),
+  TableBinding (..),
   Field (..),
   Abi (..),
   abiOf,
@@ -59,6 +62,18 @@ data Binding = Binding
   }
   deriving stock (Eq, Show)
 
+-- | A table of addresses: what its entries point at, and how many there are.
+data TableBinding = TableBinding
+  { tableBindingName :: Name
+  , tableBindingType :: ScalarType
+  , tableBindingAlign :: Natural
+  , tableBindingEntries :: Expr
+  -- ^ A contract the launch checks, outside the hash.
+  , tableBindingExtent :: Expr
+  -- ^ Elements of each entry's array the kernel may touch, outside the hash.
+  }
+  deriving stock (Eq, Show)
+
 data Field = Field
   { fieldName :: Name
   , fieldType :: ScalarType
@@ -69,6 +84,8 @@ data Field = Field
 
 data Abi = Abi
   { abiBuffers :: [Binding]
+  , abiTables :: [TableBinding]
+  -- ^ Bound after the buffers.
   , abiParams :: [Field]
   , abiParamsSize :: Natural
   {- ^ The parameter struct's size, a multiple of its alignment; 0 when
@@ -84,6 +101,7 @@ abiOf k = abi {abiHash = fnv1a64 (abiDescription abi)}
   abi =
     Abi
       { abiBuffers = [Binding b.bufName b.bufAccess b.bufType b.bufAlign b.bufExtent | b <- k.kernelBuffers]
+      , abiTables = [TableBinding t.tableName t.tableType t.tableAlign t.tableEntries t.tableExtent | t <- k.kernelTables]
       , abiParams = fields
       , abiParamsSize = roundUp alignment end
       , abiHash = 0
@@ -107,6 +125,7 @@ abiDescription a =
       <> [ "buffer " <> b.bindingName <> " " <> access b.bindingAccess <> " " <> scalarTypeName b.bindingType <> " align " <> showT b.bindingAlign
          | b <- a.abiBuffers
          ]
+      <> ["table " <> t.tableBindingName <> " " <> scalarTypeName t.tableBindingType <> " align " <> showT t.tableBindingAlign | t <- a.abiTables]
       <> ["param " <> f.fieldName <> " " <> scalarTypeName f.fieldType <> " at " <> showT f.fieldOffset | f <- a.abiParams]
       <> ["params size " <> showT a.abiParamsSize]
  where
@@ -121,8 +140,9 @@ abiDescription a =
 {- | Whether overrides may replace a kernel together, as findings; none
 when they may. Each must have the kernel's ABI and take its dimensions as
 dimensions; together they must take every legal value of them; and where
-one takes the kernel's values, its buffers' extents must be no larger
-than the kernel's, since its launches keep only the kernel's contract.
+one takes the kernel's values, its buffers' extents and its tables' sizes
+must be no larger than the kernel's, since its launches keep only the
+kernel's contract.
 -}
 checkOverrides :: Checked t -> [Checked t] -> [Finding]
 checkOverrides kernel overrides
@@ -170,6 +190,11 @@ checkOverrides kernel overrides
         [ larger o box ("extent of " <> c.bufName) c.bufExtent b.bufExtent
         | (b, c) <- zip k.kernelBuffers o.kernelBuffers
         ]
+        <> concat
+          [ larger o box ("number of entries of table " <> c.tableName) c.tableEntries t.tableEntries
+              <> larger o box ("extent of each entry of table " <> c.tableName) c.tableExtent t.tableExtent
+          | (t, c) <- zip k.kernelTables o.kernelTables
+          ]
   larger o box what oe ke = case (launchSize (Map.keysSet box) oe, launchSize (Map.keysSet box) ke) of
     (Just a, Just b) ->
       let theirs = "The override " <> o.kernelName <> "'s " <> what <> ", " <> sizeText a <> ","

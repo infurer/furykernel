@@ -16,8 +16,8 @@ typed surface or not, and re-check what the types promise:
 * names valid in every target language and unique;
 * typing of every expression and statement;
 * launch sizes: every dimension with legal values, and the grid and the
-  buffers' extents in u32 at every step, dividing by no zero, for every
-  legal value of their dimensions ("FuryKernel.Check.Launch");
+  buffers' and tables' sizes in u32 at every step, dividing by no zero,
+  for every legal value of their dimensions ("FuryKernel.Check.Launch");
 * uniformity: a divergence analysis computes how uniform every value is
   (across the threadgroup, across each SIMD group, or per lane) and
   verifies the conditions and loop bounds the builder declared uniform. A
@@ -155,6 +155,7 @@ checkNames k =
     [k.kernelName]
       <> map (.paramName) k.kernelParams
       <> map (.bufName) k.kernelBuffers
+      <> map (.tableName) k.kernelTables
       <> map (.tgName) k.kernelTgArrays
       <> concatMap bound k.kernelBody
   bound = \case
@@ -162,6 +163,7 @@ checkNames k =
     SVar n _ _ -> [n]
     SSimd n _ _ _ -> [n]
     SLoadPack ns _ _ _ -> ns
+    SLoadPackVia ns _ _ _ _ -> ns
     SIf _ _ th el -> concatMap bound th <> concatMap bound el
     SFor _ v _ _ _ body -> v : concatMap bound body
     _ -> []
@@ -213,6 +215,7 @@ checkTyping k =
  where
   params = Map.fromList [(p.paramName, p.paramType) | p <- k.kernelParams]
   buffers = Map.fromList [(b.bufName, b) | b <- k.kernelBuffers]
+  tables = Map.fromList [(t.tableName, t) | t <- k.kernelTables]
   arrays = Map.fromList [(a.tgName, a) | a <- k.kernelTgArrays]
 
   run = traverse_ stmt k.kernelBody
@@ -294,6 +297,12 @@ checkTyping k =
           | (from, to) `elem` [(TI32, TI8), (TU32, TU8)] -> pure (Just to)
           | otherwise -> Nothing <$ bad ("No integer narrowing from " <> scalarTypeName from <> " to " <> scalarTypeName to <> ".")
         Nothing -> pure Nothing
+    ELoadVia n e i -> do
+      index ("the entries of table " <> n) e
+      index ("table " <> n) i
+      case Map.lookup n tables of
+        Just t -> pure (Just t.tableType)
+        Nothing -> Nothing <$ bad ("No table " <> n <> ".")
     ELoad n i -> do
       index ("buffer " <> n) i
       case Map.lookup n buffers of
@@ -364,6 +373,15 @@ checkTyping k =
       case Map.lookup n arrays of
         Just a -> expect ("The value stored to " <> n) a.tgType e
         Nothing -> bad ("No threadgroup array " <> n <> ".")
+    SLoadPackVia ns t n e i -> do
+      index ("the entries of table " <> n) e
+      index ("table " <> n) i
+      case Map.lookup n tables of
+        Just tb ->
+          when (tb.tableType /= t) $
+            bad ("A pack of " <> scalarTypeName t <> " loaded through " <> n <> ", a table of " <> scalarTypeName tb.tableType <> ".")
+        Nothing -> bad ("No table " <> n <> ".")
+      traverse_ (\l -> declare l (Local t False)) ns
     SLoadPack ns t n i -> do
       index ("buffer " <> n) i
       case Map.lookup n buffers of
@@ -401,6 +419,10 @@ interfaceTyping :: IR.Kernel -> [Finding]
 interfaceTyping k =
   [Finding Typing ("The grid size " <> m) | Just m <- [launchOnly k.kernelGroups]]
     <> [Finding Typing ("The extent of " <> b.bufName <> " " <> m) | b <- k.kernelBuffers, Just m <- [launchOnly b.bufExtent]]
+    <> [ Finding Typing ("The size of table " <> t.tableName <> " " <> m)
+       | t <- k.kernelTables
+       , Just m <- [launchOnly t.tableEntries, launchOnly t.tableExtent]
+       ]
     <> [ Finding Typing ("The dimension " <> p.paramName <> " is " <> scalarTypeName p.paramType <> ", not u32.")
        | p <- k.kernelParams
        , isDim p.paramRole
@@ -457,6 +479,7 @@ checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
     SAssign n e -> bind n (max r (uni m e)) m
     SSimd n _ _ _ -> bind n (max r S) m
     SLoadPack ns _ b i -> foldl' (\m' n -> bind n (uni m (ELoad b i)) m') m ns
+    SLoadPackVia ns _ b e i -> foldl' (\m' n -> bind n (uni m (ELoadVia b e i)) m') m ns
     SIf d c th el ->
       let r' = inner r d (uni m c)
           (eth, eel) = blocks2 inside
@@ -490,6 +513,8 @@ checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
     EConvert _ e -> uniIn stored m e
     ENarrowInt _ _ e -> uniIn stored m e
     -- Only a buffer the kernel never writes reads the same in every thread.
+    -- Tables are only read: the same entry and index read the same element.
+    ELoadVia _ e i -> max (uniIn stored m e) (uniIn stored m i)
     ELoad n i
       | n `elem` readOnly -> uniIn stored m i
       | otherwise -> D
@@ -639,9 +664,13 @@ checkPacks caps k = nub [locatedAt (Location k.kernelName (reverse place)) f | (
     SIf _ c th el -> concatMap (flatten (ifPlace c : place)) th <> concatMap (flatten (elsePlace c : place)) el
     SFor _ v _ _ _ body -> concatMap (flatten (forPlace v : place)) body
     s -> [(place, s)]
+  tables = Map.fromList [(t.tableName, t) | t <- k.kernelTables]
   pack = \case
     SLoadPack ns _ b _ -> width b (length ns)
     SStorePack b _ es -> width b (length es)
+    SLoadPackVia ns _ t _ _ -> case Map.lookup t tables of
+      Just tb -> checkPack caps tb.tableType (fromIntegral (length ns)) tb.tableAlign
+      Nothing -> []
     _ -> []
   -- The typing check reports unknown buffers.
   width b n = case Map.lookup b buffers of
@@ -656,5 +685,6 @@ checkResources caps k =
     <> checkThreads caps k.kernelThreads
     <> concatMap (\a -> checkTgArrayOf caps a.tgType a.tgCount) k.kernelTgArrays
     <> checkTgTotal caps [(a.tgName, tgBytes a) | a <- k.kernelTgArrays]
-    <> checkBuffers caps (fromIntegral (length k.kernelBuffers) + (if null k.kernelParams then 0 else 1))
+    <> checkBuffers caps (fromIntegral (length k.kernelBuffers + length k.kernelTables) + (if null k.kernelParams then 0 else 1))
     <> concat [checkAlign ("Buffer " <> b.bufName) b.bufType b.bufAlign | b <- k.kernelBuffers]
+    <> concat [checkAlign ("Table " <> t.tableName) t.tableType t.tableAlign | t <- k.kernelTables]

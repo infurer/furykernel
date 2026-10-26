@@ -83,9 +83,11 @@ module FuryKernel.Build (
   Sig,
   Access (..),
   Buf,
+  Tab,
   dim,
   param,
   buffer,
+  table,
   threads,
   groups,
 
@@ -108,10 +110,12 @@ module FuryKernel.Build (
   get,
   (.=),
   load,
+  loadVia,
   store,
   Pack,
   unpack,
   loadPack,
+  loadPackVia,
   storePack,
   tgLoad,
   tgStore,
@@ -168,6 +172,7 @@ data BuildState = BuildState
   { names :: Set Name
   , params :: Seq IR.Param
   , buffers :: Seq IR.Buffer
+  , tables :: Seq IR.Table
   , tgArrays :: Seq IR.TgArray
   , threadsPer :: Maybe Natural
   , gridGroups :: Maybe IR.Expr
@@ -239,6 +244,7 @@ kernel name (Sig sig) =
       , IR.kernelGroups = fromMaybe (IR.ELit (IR.LU32 0)) final.gridGroups
       , IR.kernelParams = toList final.params
       , IR.kernelBuffers = toList final.buffers
+      , IR.kernelTables = toList final.tables
       , IR.kernelTgArrays = toList final.tgArrays
       , IR.kernelBody = toList final.stmts
       }
@@ -259,6 +265,7 @@ kernel name (Sig sig) =
       { names = Set.empty
       , params = Seq.empty
       , buffers = Seq.empty
+      , tables = Seq.empty
       , tgArrays = Seq.empty
       , threadsPer = Nothing
       , gridGroups = Nothing
@@ -591,6 +598,15 @@ type role Buf nominal nominal nominal nominal
 
 newtype Buf t acc align a = Buf Name
 
+{- | A table of device addresses for target @t@: each entry the start of an
+array of @a@ aligned to @align@ bytes. Kernels only read through tables.
+-}
+type Tab :: Type -> Nat -> Type -> Type
+
+type role Tab nominal nominal nominal
+
+newtype Tab t align a = Tab Name
+
 -- | A u32 dimension of the launch, in the parameter struct.
 dim :: Name -> IR.DimRange -> Sig t (Exp Word32)
 dim n r = Sig $ do
@@ -620,6 +636,24 @@ buffer n (Exp extent) = Sig $ do
   let b' = IR.Buffer n (accessOf @acc) (scalarType @a) (natVal (Proxy @align)) extent
   modify' (\b -> b {buffers = b.buffers Seq.|> b'})
   pure (Buf n)
+
+{- | @table \@16 \@BF16 "experts" entries extent@: a table of @entries@
+addresses, each of an array of which the kernel may touch @extent@
+elements, aligned as a buffer is ('AlignOk'). Tables bind after the
+buffers.
+-}
+table ::
+  forall align a t.
+  (KnownNat align, IsScalar a, AlignOk a align) =>
+  Name ->
+  Exp Word32 ->
+  Exp Word32 ->
+  Sig t (Tab t align a)
+table n (Exp entries) (Exp extent) = Sig $ do
+  claim n
+  let tb = IR.Table n (scalarType @a) (natVal (Proxy @align)) entries extent
+  modify' (\b -> b {tables = b.tables Seq.|> tb})
+  pure (Tab n)
 
 -- | @threads \@256@: threads per threadgroup, checked against @t@ statically.
 threads :: forall n t. (KnownNat n, ThreadsOk t n) => Sig t ()
@@ -751,6 +785,10 @@ Var n .= Exp e = K (emit (IR.SAssign n e))
 load :: (Readable acc) => Buf t acc align a -> Exp Word32 -> Exp a
 load (Buf n) (Exp i) = Exp (IR.ELoad n i)
 
+-- | Element @i@ of the array that entry @e@ of the table points at.
+loadVia :: Tab t align a -> Exp Word32 -> Exp Word32 -> Exp a
+loadVia (Tab n) (Exp e) (Exp i) = Exp (IR.ELoadVia n e i)
+
 store :: (Writable acc) => Buf t acc align a -> Exp Word32 -> Exp a -> K r ()
 store (Buf n) (Exp i) (Exp e) = K (emit (IR.SStore n i e))
 
@@ -778,6 +816,22 @@ loadPack ::
 loadPack base (Buf b) (Exp j) = K $ do
   names <- traverse (\i -> fresh (base <> "_" <> T.pack (show i))) [0 .. natVal (Proxy @n) - 1]
   emit (IR.SLoadPack names (scalarType @a) b j)
+  pure (Pack (map (Exp . IR.EVar) names))
+
+{- | @loadPackVia \@8 "wv" w e j@: elements @8 j@ to @8 j + 7@ of the array
+that entry @e@ of the table points at, read at once.
+-}
+loadPackVia ::
+  forall n t align a r.
+  (KnownNat n, IsScalar a, PackOk t n a align) =>
+  Name ->
+  Tab t align a ->
+  Exp Word32 ->
+  Exp Word32 ->
+  K r (Pack n a)
+loadPackVia base (Tab b) (Exp e) (Exp j) = K $ do
+  names <- traverse (\i -> fresh (base <> "_" <> T.pack (show i))) [0 .. natVal (Proxy @n) - 1]
+  emit (IR.SLoadPackVia names (scalarType @a) b e j)
   pure (Pack (map (Exp . IR.EVar) names))
 
 {- | @storePack \@4 y j [a, b, c, d]@: elements @4 j@ to @4 j + 3@ of @y@,

@@ -23,11 +23,12 @@ What the model makes explicit:
   kernel whose lanes race to one address gives seed-dependent results; a
   lane's pack lands whole;
 * errors instead of undefined behaviour: accesses past what the kernel
-  declares (a buffer's extent, a threadgroup array's size), however much
-  the launch gives, dimensions outside their declared range, reads of
-  threadgroup memory never written, integer division by zero and the one
-  quotient that overflows, loops that never end, and barriers or
-  SIMD-group operations reached by part of a group.
+  declares (a buffer's extent, a table's entries and each entry's extent,
+  a threadgroup array's size), however much the launch gives, dimensions
+  outside their declared range, reads of threadgroup memory never
+  written, integer division by zero and the one quotient that overflows,
+  loops that never end, and barriers or SIMD-group operations reached by
+  part of a group.
 
 Between barriers, the lanes run in lockstep here, so a read that races
 with another lane's write still sees it; the hazard check of a later stage
@@ -39,6 +40,7 @@ module FuryKernel.Interp (
   Launch,
   launch,
   withSeed,
+  withTables,
   RunError (..),
   run,
 ) where
@@ -90,7 +92,8 @@ valueType = \case
   VU8 _ -> TU8
   VBool _ -> TBool
 
-{- | What a launch is given: the parameter struct and every buffer. Made by
+{- | What a launch is given: the parameter struct, every buffer, the seed of
+the stores' order, and per table the arrays its entries point at. Made by
 'launch' and the setters after it, which what a launch gains later leaves
 as they are.
 -}
@@ -98,15 +101,20 @@ data Launch = Launch
   { launchParams :: Map Name Value
   , launchBuffers :: Map Name [Value]
   , launchSeed :: Word64
+  , launchTables :: Map Name [[Value]]
   }
 
--- | A launch of these parameters and buffers: seed 0.
+-- | A launch of these parameters and buffers: seed 0, no tables.
 launch :: Map Name Value -> Map Name [Value] -> Launch
-launch params buffers = Launch params buffers 0
+launch params buffers = Launch params buffers 0 Map.empty
 
 -- | The launch, the order of its stores drawn from this seed.
 withSeed :: Word64 -> Launch -> Launch
 withSeed seed l = l {launchSeed = seed}
+
+-- | The launch, per table the arrays its entries point at.
+withTables :: Map Name [[Value]] -> Launch -> Launch
+withTables tables l = l {launchTables = tables}
 
 {- | What stops a run. More may come: match those you expect and leave the
 rest to a catch-all.
@@ -119,11 +127,14 @@ data RunError
   | -- | A buffer shorter than its declared extent: name, extent, length.
     ShortBuffer Name Int Int
   | {- | An access past what the kernel declares: name, index, and the
-    buffer's extent or the threadgroup array's size.
+    buffer's or the table entry's extent, the table's entries, or the
+    threadgroup array's size.
     -}
     OutOfBounds Name Integer Int
   | -- | A dimension outside its declared range or off its multiple: name, value, range.
     DimOutOfRange Name Word32 DimRange
+  | -- | A table with fewer entries than the kernel declares: name, entries, given.
+    ShortTable Name Int Int
   | UninitializedRead Name Int
   | DivideByZero
   | -- | The one signed quotient that overflows: the minimum by -1.
@@ -148,6 +159,7 @@ data Env s = Env
   , envKernel :: IR.Kernel
   , envParams :: Map Name Value
   , envBuffers :: Map Name (STArray s Int Value)
+  , envTables :: Map Name [STArray s Int Value]
   , envSeed :: Word64
   , envStoreCount :: STRef s Word64
   }
@@ -174,7 +186,8 @@ execute caps k supplied = do
           _ -> pure (p.paramName, v)
   let paramMap = Map.fromList params
   -- Each buffer as far as its declared extent, the rest of what the launch
-  -- gives kept aside, untouched.
+  -- gives kept aside, untouched; each table as far as its declared entries,
+  -- each entry as far as its declared extent.
   buffers <- forM k.kernelBuffers $ \b -> case Map.lookup b.bufName supplied.launchBuffers of
     Nothing -> throwE (MissingBuffer b.bufName)
     Just vs -> do
@@ -183,8 +196,19 @@ execute caps k supplied = do
       when (length vs < extent) $ throwE (ShortBuffer b.bufName extent (length vs))
       arr <- lift (newListArray (0, extent - 1) (take extent vs))
       pure (b.bufName, (arr, drop extent vs))
+  tables <- forM k.kernelTables $ \t -> case Map.lookup t.tableName supplied.launchTables of
+    Nothing -> throwE (MissingBuffer t.tableName)
+    Just entries -> do
+      count <- fromIntegral <$> hostU32 paramMap t.tableEntries
+      extent <- fromIntegral <$> hostU32 paramMap t.tableExtent
+      when (length entries < count) $ throwE (ShortTable t.tableName count (length entries))
+      arrays <- forM (take count entries) $ \vs -> do
+        forM_ vs $ \v -> when (valueType v /= t.tableType) $ throwE (WrongType t.tableName t.tableType (valueType v))
+        when (length vs < extent) $ throwE (ShortBuffer t.tableName extent (length vs))
+        lift (newListArray (0, extent - 1) (take extent vs))
+      pure (t.tableName, arrays)
   counter <- lift (newSTRef 0)
-  let env = Env caps k paramMap (Map.fromList [(n, arr) | (n, (arr, _)) <- buffers]) supplied.launchSeed counter
+  let env = Env caps k paramMap (Map.fromList [(n, arr) | (n, (arr, _)) <- buffers]) (Map.fromList tables) supplied.launchSeed counter
   groups <- hostU32 paramMap k.kernelGroups
   forM_ (if groups == 0 then [] else [0 .. groups - 1]) $ \g -> do
     locals <- lift (newSTRef Map.empty)
@@ -257,6 +281,17 @@ stmt env grp active s = unless (null active) $ case s of
       j <- eval env grp l i >>= index
       forM [j * width .. j * width + width - 1] $ \ix -> do
         checkBounds b arr ix
+        lift (readArray arr (fromIntegral ix))
+    forM_ (zip ns (transpose packs)) $ \(n, vs) -> do
+      local' <- fresh n
+      forM_ (zip active vs) $ \(l, v) -> lift (writeArray local' l $! v)
+  SLoadPackVia ns _ t e i -> do
+    let width = toInteger (length ns)
+    packs <- forM active $ \l -> do
+      arr <- tableEntry env t =<< eval env grp l e
+      j <- eval env grp l i >>= index
+      forM [j * width .. j * width + width - 1] $ \ix -> do
+        checkBounds t arr ix
         lift (readArray arr (fromIntegral ix))
     forM_ (zip ns (transpose packs)) $ \(n, vs) -> do
       local' <- fresh n
@@ -336,6 +371,15 @@ stmt env grp active s = unless (null active) $ case s of
     lift (modifySTRef' env.envStoreCount (+ 1))
     pure (map snd (sortOn fst [(mix (env.envSeed `xor` mix count `xor` fromIntegral j), w) | (j, w) <- zip [0 :: Int ..] writes]))
 
+-- | The array an entry of a table points at.
+tableEntry :: Env s -> Name -> Value -> M s (STArray s Int Value)
+tableEntry env t e = do
+  entry <- u32 e
+  arrays <- maybe (throwE (MissingBuffer t)) pure (Map.lookup t env.envTables)
+  case drop (fromIntegral entry) arrays of
+    arr : _ -> pure arr
+    [] -> throwE (OutOfBounds t (toInteger entry) (length arrays))
+
 -- | Iterations after which a loop counts as one that never ends.
 maxIterations :: Int
 maxIterations = 2 ^ (24 :: Int)
@@ -407,6 +451,11 @@ eval env grp lane = go
     ELoad n i -> do
       ix <- go i >>= u32
       arr <- maybe (throwE (MissingBuffer n)) pure (Map.lookup n env.envBuffers)
+      checkBounds n arr (toInteger ix)
+      lift (readArray arr (fromIntegral ix))
+    ELoadVia n e i -> do
+      arr <- tableEntry env n =<< go e
+      ix <- go i >>= u32
       checkBounds n arr (toInteger ix)
       lift (readArray arr (fromIntegral ix))
     ETgLoad n i -> do
