@@ -4,26 +4,28 @@
 
 {- | Threadgroup reductions, through an RMSNorm kernel: within one bf16 ulp
 of its f64 specification on every SIMD width, and bitwise the same for a
-row whatever else is in the batch.
+row whatever else is in the batch. Split-K's combine, in its order.
 -}
 module Test.FuryKernel.ReduceTest (tests) where
 
 import Data.Bits (testBit, (.&.))
 import Data.Map.Strict qualified as Map
+import Data.Proxy (Proxy (..))
 import Data.Word (Word16, Word32)
 import FuryKernel.Build
 import FuryKernel.Check (check)
-import FuryKernel.Constraint (TgArrayOk, ThreadsOk)
+import FuryKernel.Constraint (TgArrayOk, ThreadsOk, withTgArray)
 import FuryKernel.Finding (Finding (..), Rule (..))
 import FuryKernel.IR (Name)
 import FuryKernel.Interp (Value (..))
 import FuryKernel.Numerics (narrowBF16, widenBF16)
-import FuryKernel.Reduce (tgReduceMax, tgReduceSum)
+import FuryKernel.Reduce (combineSplits, tgReduceMax, tgReduceSum)
 import FuryKernel.Target (Target)
 import FuryKernel.Type (BF16 (..))
 import Hedgehog (Gen, Property, annotateShow, assert, forAll, property, withTests, (===))
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
+import Numeric.Natural (Natural)
 import Test.FuryKernel.Kernels (rmsnorm)
 import Test.FuryKernel.Run (runOn)
 import Test.FuryKernel.Targets (T32, T64, T8)
@@ -52,6 +54,15 @@ tests =
         stored (branchOn @T32 True (-3)) @?= Right (Just [VF32 0])
     , testCase "the scratch needs a slot per SIMD group" $
         either (map (.findingRule)) (const []) (check (smallScratch @T8)) @?= [ThreadgroupMemory]
+    , testCase "split-K adds the partials in split order" $
+        -- ((1e8 + 1) - 1e8) + 1 is 1 in f32; the other orders give 0 or 2.
+        fmap (Map.lookup "y") (runOn (splitSums @T32 8) [] [("p", map VF32 [1e8, 1, -1e8, 1, 3, 4, 5, 6]), ("y", [VF32 0, VF32 0])] 0)
+          @?= Right (Just [VF32 1, VF32 18])
+    , testCase "split-K's partials need a slot per split and output" $
+        either (map (.findingRule)) (const []) (check (splitSums @T32 4)) @?= [ThreadgroupMemory]
+    , testCase "split-K's combine needs at least one split" $
+        either (map (.findingMessage)) (const []) (check (combineOf @T32 0))
+          @?= ["The partials of total come in no splits: a combine needs at least one."]
     ]
 
 hiddens :: Gen Word32
@@ -180,3 +191,29 @@ smallScratch = kernel "small_scratch" $ do
     pure $ do
       s <- tgReduceSum "total" scratch 1
       whenLane (threadIndex .== 0) (store y 0 s)
+
+-- | Split-K's combine of @splits@ splits of two outputs, from eight slots.
+combineOf :: forall t. (Target t, ThreadsOk t 32, TgArrayOk t 8 Float) => Natural -> Kernel t
+combineOf splits = kernel "combine_of" $ do
+  y <- buffer @WriteOnly @16 @Float "y" 2
+  threads @32
+  groups 1
+  pure $ do
+    partials <- tgArray @8 @Float "partials"
+    pure $ do
+      whenLane (threadIndex .< 8) (tgStore partials threadIndex 0)
+      combineSplits "total" partials splits 2 (store y)
+
+-- | Two outputs of four splits each, from @p@, with @slots@ partials.
+splitSums :: forall t. (Target t, ThreadsOk t 32) => Natural -> Kernel t
+splitSums slots = either (error . show) id $ withTgArray @t @Float slots $ \(_ :: Proxy n) ->
+  kernel "split_sums" $ do
+    p <- buffer @ReadOnly @16 @Float "p" 8
+    y <- buffer @WriteOnly @16 @Float "y" 2
+    threads @32
+    groups 1
+    pure $ do
+      partials <- tgArray @n @Float "partials"
+      pure $ do
+        whenLane (threadIndex .< 8) (tgStore partials threadIndex (load p threadIndex))
+        combineSplits "total" partials 4 2 (store y)

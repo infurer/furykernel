@@ -155,9 +155,11 @@ nix fmt && git diff --exit-code &&
     past what the kernel declares, however much the launch gives,
     dimensions outside their range, integer division by zero or overflow.
   - `FuryKernel.Reduce`: threadgroup reductions (`tgReduceSum` from -0,
-    `tgReduceMax` from -inf) from SIMD-group reductions and a scratch array. Their
-    order depends on the thread count and SIMD width only, so a row's
-    result doesn't depend on the batch.
+    `tgReduceMax` from -inf) from SIMD-group reductions and a scratch array, and
+    split-K's combine (`combineSplits`), which adds each output's partials
+    in split order. Their order depends on the thread count, the SIMD
+    width and the splits only, so a row's result doesn't depend on the
+    batch.
   - `FuryKernel.Abi`: a kernel's binary interface, its buffers and its
     parameter struct in C layout, and the FNV-1a hash of their canonical
     description, which tuned overrides keep and runtimes' generators assert;
