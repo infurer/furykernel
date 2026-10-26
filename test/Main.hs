@@ -6,6 +6,7 @@ module Main (main) where
 import Control.Applicative ((<|>))
 import Hedgehog.Internal.Property (Skip (SkipNothing))
 import Hedgehog.Internal.Seed qualified as Seed
+import Test.FuryKernel.ConstraintTest qualified as ConstraintTest
 import Test.FuryKernel.NumericsTest qualified as NumericsTest
 import Test.Tasty (adjustOption, defaultMain, testGroup)
 import Test.Tasty.Hedgehog (HedgehogReplay (..))
@@ -20,4 +21,5 @@ main =
     testGroup
       "furykernel"
       [ NumericsTest.tests
+      , ConstraintTest.tests
       ]

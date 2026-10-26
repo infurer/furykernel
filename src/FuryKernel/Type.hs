@@ -15,6 +15,7 @@ module FuryKernel.Type (
   -- * Scalar types
   ScalarType (..),
   scalarSize,
+  leastAlign,
   isStorageOnly,
   isFloating,
   isIntegral,
@@ -27,13 +28,16 @@ module FuryKernel.Type (
 
   -- * Reflection
   IsScalar (..),
+  LeastAlign,
 ) where
 
 import Data.Int (Int32, Int8)
 import Data.Kind (Constraint, Type)
 import Data.Text (Text)
+import Data.Type.Bool (If)
 import Data.Word (Word16, Word32, Word8)
-import GHC.TypeLits (Nat)
+import GHC.TypeLits (Nat, type (<=?))
+import Numeric.Natural (Natural)
 
 -- | The scalar types, as data.
 data ScalarType
@@ -58,6 +62,13 @@ scalarSize = \case
   TI8 -> 1
   TU8 -> 1
   TBool -> 1
+
+{- | The least alignment of an array of the type in memory, in bytes: 16,
+or the type's size if larger. Buffers, tables and threadgroup arrays are
+aligned to it at least.
+-}
+leastAlign :: ScalarType -> Natural
+leastAlign t = max 16 (fromIntegral (scalarSize t))
 
 -- | Types that have no arithmetic and must be widened first.
 isStorageOnly :: ScalarType -> Bool
@@ -153,3 +164,7 @@ instance IsScalar Word8 where
 instance IsScalar Bool where
   scalarType = TBool
   type ByteSize Bool = 1
+
+-- | 'leastAlign' at the type level.
+type LeastAlign :: Type -> Nat
+type LeastAlign a = If (ByteSize a <=? 16) 16 (ByteSize a)

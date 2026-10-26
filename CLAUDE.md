@@ -69,14 +69,34 @@ nix fmt && git diff --exit-code &&
   - `FuryKernel.Numerics`: those conversions as kernels perform them,
     exact widening and round-to-nearest-even narrowing, and binary64 to
     binary16 in one rounding, not through binary32 (`narrowF16Double`).
+  - `FuryKernel.Target`: the `Target` class, whose associated types state a
+    GPU family's limits, reflected into `TargetCaps`. Target libraries
+    define the instances; the core defines none.
+  - `FuryKernel.Constraint`: each resource rule twice, as a type family for
+    static mode and as a term decider for the gate and dynamic mode, which
+    reflects runtime numbers into the static constraints. Each condition is
+    a named family that both the rule's `Bool` form and its enforced
+    constraint are built from. Their messages carry the arithmetic.
+    A threadgroup array takes its size rounded up to its alignment; an
+    alignment in device memory is a power of two, at least 16 B and the
+    element size.
+    `FuryKernel.Finding`: what the rules report, a rule and a message
+    (`Finding`), and where one has a place, the kernel or program and the
+    place in it (`locatedAt`); fields that come later leave both as they
+    are.
 - `test/`: the test suite, tasty with hedgehog properties, all from one
   seed unless `--hedgehog-replay` gives another. Conversions are
   checked exhaustively where the domain is 16 bits wide, and otherwise
-  against exact `Rational` arithmetic.
+  against exact `Rational` arithmetic. Test targets have SIMD widths from 8
+  to 64. Each rule's conditions, as named families and in the decider, are
+  checked to agree on sample points.
+  `test/no-compile/`: programs static mode must reject, each at one
+  place, with the message it must reject them with on its one
+  `-- EXPECT:` line.
 - `nix/`: `package.nix` (the library, built with GHC 9.12 under
-  `-Werror`), `checks.nix` (the build with its tests, hlint,
-  cabal2nix-in-sync and `reuse lint`), `devshell.nix` (`checks.devshell` builds its shell) and `treefmt.nix`
-  (`nix fmt` and `checks.treefmt`).
+  `-Werror`), `checks.nix` (the build with its tests, the no-compile tests,
+  hlint, cabal2nix-in-sync and `reuse lint`), `devshell.nix` (`checks.devshell` builds its shell) and
+  `treefmt.nix` (`nix fmt` and `checks.treefmt`).
 - `.gitlab-ci.yml`: GitLab CI on x86_64-linux runners. `checks` runs
   `nix flake check --all-systems`, which builds x86_64-linux's checks;
   `publish-github`, on master once those passed, pushes master, and the

@@ -37,6 +37,7 @@ common warnings
 common extensions
   default-language: GHC2024
   default-extensions:
+    OverloadedRecordDot
     OverloadedStrings
     StrictData
     TypeFamilies
@@ -46,7 +47,10 @@ library
   hs-source-dirs: src
   exposed-modules:
     FuryKernel
+    FuryKernel.Constraint
+    FuryKernel.Finding
     FuryKernel.Numerics
+    FuryKernel.Target
     FuryKernel.Type
 
   build-depends:
@@ -58,7 +62,11 @@ test-suite furykernel-test
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
-  other-modules: Test.FuryKernel.NumericsTest
+  other-modules:
+    Test.FuryKernel.ConstraintTest
+    Test.FuryKernel.NumericsTest
+    Test.FuryKernel.Targets
+
   ghc-options:
     -threaded
     -rtsopts
@@ -71,3 +79,4 @@ test-suite furykernel-test
     tasty >=1.5 && <1.6,
     tasty-hedgehog >=1.4 && <1.5,
     tasty-hunit >=0.10 && <0.11,
+    text,

@@ -5,10 +5,45 @@
 {self, ...}: {
   perSystem = {
     config,
+    haskellPackages,
     pkgs,
     ...
   }: {
     checks = {
+      # Static mode rejects what it should: every file in test/no-compile
+      # fails to type-check at one place, with the message its one
+      # `-- EXPECT:` line names, found outside the source lines GHC echoes.
+      no-compile = let
+        ghc = haskellPackages.ghcWithPackages (_: [config.packages.furykernel]);
+      in
+        pkgs.runCommand "no-compile" {
+          nativeBuildInputs = [ghc];
+        } ''
+          status=0
+          for f in ${self}/test/no-compile/*.hs; do
+            name=''${f#${self}/}
+            want=$(sed -n 's/^-- EXPECT: //p' "$f")
+            expects=$(grep -c '^-- EXPECT: ' "$f" || true)
+            if [ "$expects" -ne 1 ]; then
+              echo "$name: $expects -- EXPECT: lines, not one" >&2
+              status=1
+            elif ghc -fno-code -outputdir "$TMPDIR/out" "$f" > log 2>&1; then
+              echo "$name: compiles, but should fail with: $want" >&2
+              status=1
+            elif places=$(grep -o -E '^[^ ]+: error:' log | sort -u | wc -l); [ "$places" -ne 1 ]; then
+              echo "$name: fails at $places places, not one" >&2
+              cat log >&2
+              status=1
+            elif ! grep -v -E '^ *[0-9]* *[|]' log | tr '\n' ' ' | tr -s ' ' | grep -q -F -- "$want"; then
+              echo "$name: fails, but not with: $want" >&2
+              cat log >&2
+              status=1
+            fi
+          done
+          [ "$status" -eq 0 ]
+          touch $out
+        '';
+
       # The library and its tests, under -Werror.
       build = pkgs.haskell.lib.compose.doCheck config.packages.furykernel;
 
@@ -17,7 +52,7 @@
         pkgs.runCommand "hlint" {
           nativeBuildInputs = [pkgs.hlint];
         } ''
-          hlint ${self}/src ${self}/test
+          hlint --hint=${self}/.hlint.yaml ${self}/src ${self}/test
           touch $out
         '';
 

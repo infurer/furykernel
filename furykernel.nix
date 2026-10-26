@@ -7,7 +7,7 @@ mkDerivation {
   src = ./.;
   libraryHaskellDepends = [ base text ];
   testHaskellDepends = [
-    base hedgehog tasty tasty-hedgehog tasty-hunit
+    base hedgehog tasty tasty-hedgehog tasty-hunit text
   ];
   homepage = "https://github.com/infurer/furykernel";
   description = "A typed eDSL for GPU compute kernels";
