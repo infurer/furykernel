@@ -32,7 +32,9 @@ typed surface or not, and re-check what the types promise:
 * resources: the thread count, each threadgroup array and their total in
   the kernel's layout ('FuryKernel.IR.tgLayout'), the buffer bindings and
   the alignments, by the rules of "FuryKernel.Constraint", and the SIMD
-  width the kernel was built for.
+  width the kernel was built for;
+* packs: each pack's width against the target's lane loads and its
+  buffer's alignment, by the same module's rule.
 
 Races, bounds and the order of memory operations come with the hazard and
 bounds checks of later stages.
@@ -50,6 +52,7 @@ import Control.Monad (forM_, unless, when)
 import Control.Monad.Trans.State.Strict (State, execState, gets, modify')
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
 import Data.Foldable (traverse_)
+import Data.List (nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -58,7 +61,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import FuryKernel.Build (Kernel, kernelCaps, kernelIR, kernelProblems)
 import FuryKernel.Check.Launch (checkLaunchSizes)
-import FuryKernel.Constraint (checkAlign, checkBuffers, checkTgArrayOf, checkTgTotal, checkThreads)
+import FuryKernel.Constraint (checkAlign, checkBuffers, checkPack, checkTgArrayOf, checkTgTotal, checkThreads)
 import FuryKernel.Finding (Finding (..), Location (..), Rule (..), locatedAt)
 import FuryKernel.IR hiding (Kernel (..))
 import FuryKernel.IR qualified as IR
@@ -89,7 +92,7 @@ check k
 
 -- | Every finding for a kernel's IR on a target with these limits.
 checkIR :: TargetCaps -> IR.Kernel -> [Finding]
-checkIR caps k = map (placedIn k) $ checkNames k <> checkTyping k <> checkLaunchSizes k <> checkUniformity k <> checkResources caps k
+checkIR caps k = map (placedIn k) $ checkNames k <> checkTyping k <> checkLaunchSizes k <> checkUniformity k <> checkResources caps k <> checkPacks caps k
 
 {- | A finding placed in its kernel, if nothing placed it more closely: a
 finding's place is its kernel and the ifs and loops around what it is about.
@@ -157,6 +160,7 @@ checkNames k =
     SLet n _ _ -> [n]
     SVar n _ _ -> [n]
     SSimd n _ _ _ -> [n]
+    SLoadPack ns _ _ _ -> ns
     SIf _ _ th el -> concatMap bound th <> concatMap bound el
     SFor _ v _ _ _ body -> v : concatMap bound body
     _ -> []
@@ -352,6 +356,22 @@ checkTyping k =
       case Map.lookup n arrays of
         Just a -> expect ("The value stored to " <> n) a.tgType e
         Nothing -> bad ("No threadgroup array " <> n <> ".")
+    SLoadPack ns t n i -> do
+      index ("buffer " <> n) i
+      case Map.lookup n buffers of
+        Just b -> do
+          when (b.bufAccess == WriteOnly) $ bad ("A load from the write-only buffer " <> n <> ".")
+          when (b.bufType /= t) $
+            bad ("A pack of " <> scalarTypeName t <> " loaded from " <> n <> ", a buffer of " <> scalarTypeName b.bufType <> ".")
+        Nothing -> bad ("No buffer " <> n <> ".")
+      traverse_ (\l -> declare l (Local t False)) ns
+    SStorePack n i es -> do
+      index ("buffer " <> n) i
+      case Map.lookup n buffers of
+        Just b -> do
+          when (b.bufAccess == ReadOnly) $ bad ("A store to the read-only buffer " <> n <> ".")
+          traverse_ (expect ("A value stored to " <> n) b.bufType) es
+        Nothing -> bad ("No buffer " <> n <> ".")
     SIf _ c th el -> do
       expect "The condition of an if" TBool c
       within (ifPlace c) (scoped (traverse_ stmt th))
@@ -428,6 +448,7 @@ checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
     SVar n _ e -> bind n (max r (uni m e)) m
     SAssign n e -> bind n (max r (uni m e)) m
     SSimd n _ _ _ -> bind n (max r S) m
+    SLoadPack ns _ b i -> foldl' (\m' n -> bind n (uni m (ELoad b i)) m') m ns
     SIf d c th el ->
       let r' = inner r d (uni m c)
           (eth, eel) = blocks2 inside
@@ -600,6 +621,24 @@ blocks2 = \case
 
 ------------------------------------------------------------------------------
 -- Resources
+
+-- | Every pack against the target's lane loads and its buffer's alignment.
+checkPacks :: TargetCaps -> IR.Kernel -> [Finding]
+checkPacks caps k = nub [locatedAt (Location k.kernelName (reverse place)) f | (place, s) <- concatMap (flatten []) k.kernelBody, f <- pack s]
+ where
+  buffers = Map.fromList [(b.bufName, b) | b <- k.kernelBuffers]
+  flatten place = \case
+    SIf _ c th el -> concatMap (flatten (ifPlace c : place)) th <> concatMap (flatten (elsePlace c : place)) el
+    SFor _ v _ _ _ body -> concatMap (flatten (forPlace v : place)) body
+    s -> [(place, s)]
+  pack = \case
+    SLoadPack ns _ b _ -> width b (length ns)
+    SStorePack b _ es -> width b (length es)
+    _ -> []
+  -- The typing check reports unknown buffers.
+  width b n = case Map.lookup b buffers of
+    Just buf -> checkPack caps buf.bufType (fromIntegral n) buf.bufAlign
+    Nothing -> []
 
 checkResources :: TargetCaps -> IR.Kernel -> [Finding]
 checkResources caps k =

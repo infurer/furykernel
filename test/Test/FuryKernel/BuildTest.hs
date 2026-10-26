@@ -12,7 +12,7 @@ import FuryKernel.Build
 import FuryKernel.Finding (Finding (..), Rule (..))
 import FuryKernel.IR (DimRange (..), Expr (..), Literal (..), Overflow (..), renderExpr, renderKernel)
 import FuryKernel.Type (F16, ScalarType (..))
-import Test.FuryKernel.Kernels (scale)
+import Test.FuryKernel.Kernels (scale, scalePacked)
 import Test.FuryKernel.Targets (T32)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=))
@@ -34,6 +34,24 @@ tests =
             , "  for divergent i = @thread until $n step 64u {"
             , "    let v : f32 = f32(x[i])"
             , "    y[i] = bf16((v * $s))"
+            , "  }"
+            , "}"
+            ]
+    , testCase "packs render with their width" $
+        renderKernel (kernelIR (scalePacked @T32))
+          @?= T.unlines
+            [ "ir 1"
+            , "kernel scale_packed threads 64 simd 32 groups 1u"
+            , "  param packs : u32 dim 1..8192 multiple of 1"
+            , "  param s : f32"
+            , "  buffer x : read bf16[($packs * 8u)] align 16"
+            , "  buffer y : write bf16[($packs * 8u)] align 16"
+            , "{"
+            , "  for divergent j = @thread until $packs step 64u {"
+            , "    let (v_0, v_1, v_2, v_3, v_4, v_5, v_6, v_7) : bf16 = x.pack8[j]"
+            , "    y.pack8[j] = ("
+                <> T.intercalate ", " ["bf16((f32(v_" <> T.pack (show i) <> ") * $s))" | i <- [0 .. 7 :: Int]]
+                <> ")"
             , "  }"
             , "}"
             ]
@@ -65,6 +83,8 @@ tests =
             , "  let h : f16 = f16:0x3c01"
             , "}"
             ]
+    , testCase "a pack stored with the wrong number of values" $
+        kernelProblems short @?= [Finding Typing "A pack of 4 stored to y with 3 values."]
     , testCase "an integer narrowing renders with what it does out of range" $
         map (\o -> renderExpr (ENarrowInt o TI8 (EVar "x"))) [Clamp, Wrap] @?= ["i8_clamped(x)", "i8_wrapped(x)"]
     , testCase "an fma renders as its IR, its operands in order" $
@@ -152,3 +172,10 @@ clash = kernel "clash" $ do
   n <- dim "x" (DimRange 1 8 1)
   _ <- buffer @ReadOnly @16 @Word32 "x" n
   pure (pure (pure ()))
+
+short :: Kernel T32
+short = kernel "short" $ do
+  y <- buffer @WriteOnly @16 @Float "y" 4
+  threads @32
+  groups 1
+  pure . pure $ storePack @4 y 0 [1, 2, 3]

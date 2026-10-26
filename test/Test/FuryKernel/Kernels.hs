@@ -4,12 +4,13 @@
 -- | Kernels the tests share.
 module Test.FuryKernel.Kernels (
   scale,
+  scalePacked,
   rmsnorm,
 ) where
 
 import Data.Word (Word32)
 import FuryKernel.Build
-import FuryKernel.Constraint (TgArrayOk, ThreadsOk)
+import FuryKernel.Constraint (PackOk, TgArrayOk, ThreadsOk)
 import FuryKernel.IR (DimRange (..))
 import FuryKernel.Reduce (tgReduceSum)
 import FuryKernel.Target (Target)
@@ -28,6 +29,20 @@ scale = kernel "scale" $ do
     strided "i" n $ \i -> do
       v <- let_ "v" (widen @Float (load x i))
       store y i (narrow @BF16 (v * s))
+
+-- | 'scale' with each lane reading and writing eight elements at once.
+scalePacked :: forall t. (Target t, ThreadsOk t 64, PackOk t 8 BF16 16) => Kernel t
+scalePacked = kernel "scale_packed" $ do
+  packs <- dim "packs" (DimRange 1 8192 1)
+  s <- param @Float "s"
+  x <- buffer @ReadOnly @16 @BF16 "x" (packs * 8)
+  y <- buffer @WriteOnly @16 @BF16 "y" (packs * 8)
+  threads @64
+  groups 1
+  pure . pure $
+    strided "j" packs $ \j -> do
+      v <- loadPack @8 "v" x j
+      storePack @8 y j [narrow @BF16 (widen @Float e * s) | e <- unpack v]
 
 {- | RMSNorm over rows of @hidden@ elements, one threadgroup per row:
 y = x / sqrt (mean x² + eps) * w, in bf16 with f32 arithmetic.

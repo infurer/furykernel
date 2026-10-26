@@ -59,11 +59,21 @@ tests =
           , ("bf16", alignSamples @BF16 @AlignSamples)
           , ("u8", alignSamples @Word8 @AlignSamples)
           ]
+    , testCase "packs: each condition's family and the decider agree" $
+        agree
+          ["not bool", "at least two", "a power of two", "within a lane load", "aligned"]
+          [ ("T32 bf16", packSamples @T32 @BF16 @PackSamples)
+          , ("T32 f32", packSamples @T32 @Float @PackSamples)
+          , ("T8 u8", packSamples @T8 @Word8 @PackSamples)
+          , ("T64 bool", packSamples @T64 @Bool @PackSamples)
+          ]
     , testCase "dynamic mode reflects what the decider accepts" $ do
         withThreads @T32 256 natVal @?= Right 256
         withThreads @T32 1000 natVal @?= Left (checkThreads (targetCaps @T32) 1000)
         withTgArray @T32 @Float 8192 natVal @?= Right 8192
         withTgArray @T32 @Float 8193 natVal @?= Left (checkTgArray @Float (targetCaps @T32) 8193)
+        withPack @T32 @BF16 @16 8 natVal @?= Right 8
+        withPack @T32 @BF16 @8 8 natVal @?= Left (checkPack (targetCaps @T32) TBF16 8 8)
     , testCase "messages carry the arithmetic" $ do
         checkThreads (targetCaps @T32) 1000
           @?= [Finding Threads "Threads per threadgroup on T32: 1000 is not a multiple of the SIMD width, 32."]
@@ -76,6 +86,15 @@ tests =
         checkTgTotal (targetCaps @T32) [("partial", 32), ("tile", 16384)] @?= []
         checkBuffers (targetCaps @T32) 32
           @?= [Finding Buffers "Buffer bindings on T32: 32; the limit is 31."]
+        checkPack (targetCaps @T32) TBF16 16 32
+          @?= [Finding Packs "Pack of 16 elements of 2 B = 32 B; the widest lane load on T32 is 16 B."]
+        checkPack (targetCaps @T32) TBF16 8 8
+          @?= [Finding Packs "Pack of 8 elements of 2 B = 16 B from a buffer aligned to 8 B: align it to a multiple of 16 B."]
+        checkPack (targetCaps @T32) TF32 3 16
+          @?= [ Finding Packs "Pack of 3 elements of 4 B = 12 B, which is not a power of two."
+              , Finding Packs "Pack of 3 elements of 4 B = 12 B from a buffer aligned to 16 B: align it to a multiple of 12 B."
+              ]
+        checkPack (targetCaps @T32) TBF16 8 16 @?= []
         checkAlign "Buffer x" TF32 8 @?= [Finding Alignment "Buffer x: an alignment of 8 B for elements of 4 B; the least is 16 B."]
         checkAlign "Table t" TBF16 24 @?= [Finding Alignment "Table t: an alignment of 24 B, which is not a power of two."]
         checkAlign "Buffer x" TU8 16 @?= []
@@ -118,6 +137,27 @@ instance Target Uneven where
   type TgMemBytes Uneven = 16380
   type MaxBuffers Uneven = 31
   type LaneLoadMax Uneven = 16
+
+-- | Elements and the buffer's alignment.
+type PackSamples :: [(Nat, Nat)]
+type PackSamples =
+  '[ '(0, 16)
+   , '(1, 16)
+   , '(2, 2)
+   , '(2, 4)
+   , '(2, 16)
+   , '(3, 16)
+   , '(4, 4)
+   , '(4, 8)
+   , '(4, 16)
+   , '(6, 16)
+   , '(8, 8)
+   , '(8, 16)
+   , '(8, 48)
+   , '(16, 16)
+   , '(16, 32)
+   , '(32, 64)
+   ]
 
 type ThreadSamplesOf :: Type -> [Nat] -> Constraint
 class ThreadSamplesOf t ns where
@@ -200,4 +240,37 @@ instance
     )
       : alignSamples @a @ns
    where
+    align = natVal (Proxy @align)
+
+type PackSamplesOf :: Type -> Type -> [(Nat, Nat)] -> Constraint
+class PackSamplesOf t a ss where
+  packSamples :: [((Natural, Natural), Bool, [Bool], [Bool])]
+
+instance PackSamplesOf t a '[] where
+  packSamples = []
+
+instance
+  ( Target t
+  , IsScalar a
+  , KnownNat n
+  , KnownNat align
+  , KnownBool (PackOkB t n a align)
+  , KnownBool (PackNotBool a)
+  , KnownBool (PackSome n)
+  , KnownBool (PackPowerOfTwo n a)
+  , KnownBool (PackWithin t n a)
+  , KnownBool (PackAligned n a align)
+  , PackSamplesOf t a ss
+  ) =>
+  PackSamplesOf t a ('(n, align) ': ss)
+  where
+  packSamples =
+    ( (n, align)
+    , boolVal @(PackOkB t n a align)
+    , [boolVal @(PackNotBool a), boolVal @(PackSome n), boolVal @(PackPowerOfTwo n a), boolVal @(PackWithin t n a), boolVal @(PackAligned n a align)]
+    , map (none (checkPack (targetCaps @t) (scalarType @a) n align)) ["No packs of bool", "at least two elements", "not a power of two", "the widest lane load", "from a buffer aligned to"]
+    )
+      : packSamples @t @a @ss
+   where
+    n = natVal (Proxy @n)
     align = natVal (Proxy @align)

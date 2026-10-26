@@ -7,5 +7,5 @@ module LoadFromWriteOnly (oops) where
 
 import FuryKernel.Build
 
-oops :: Buf WriteOnly 16 Float -> Exp Float
+oops :: Buf t WriteOnly 16 Float -> Exp Float
 oops b = load b 0

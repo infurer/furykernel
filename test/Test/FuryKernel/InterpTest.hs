@@ -21,7 +21,7 @@ import GHC.Float (castFloatToWord32, castWord32ToFloat, double2Float, float2Doub
 import Hedgehog (Property, forAll, property, (===))
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import Test.FuryKernel.Kernels (scale)
+import Test.FuryKernel.Kernels (scale, scalePacked)
 import Test.FuryKernel.Run (runOn)
 import Test.FuryKernel.Targets (T16, T32, T64, T8)
 import Test.Tasty (TestTree, testGroup)
@@ -33,6 +33,7 @@ tests =
   testGroup
     "Interp"
     [ testProperty "an element-wise kernel computes its spec exactly" scaleSpec
+    , testProperty "packs read and write what single elements do" packsSpec
     , testCase "lanes branch and reconverge" $
         runOn @T32 lanes [] [("y", replicate 64 (VU32 0))] 0
           @?= Right (Map.fromList [("y", [VU32 (if l `mod` 32 < 3 then 1 else 2) | l <- [0 .. 63 :: Int]])])
@@ -91,6 +92,8 @@ tests =
           @?= Left (UninitializedRead "t" 1)
         runOn @T32 divide [("d", VU32 0)] [("y", [VU32 0])] 0
           @?= Left DivideByZero
+        runOn @T32 pastEnd [] [("x", replicate 4 (VF32 0)), ("y", [VF32 0])] 0
+          @?= Left (OutOfBounds "x" 4 4)
     , testCase "a loop whose variable stands still or wraps never ends" $ do
         let stepping start step = runOn @T32 fromBy [("start", VU32 start), ("step", VU32 step)] [("y", [VU32 0])] 0
         stepping 0 0 @?= Left (NonTermination "i")
@@ -150,6 +153,17 @@ scaleSpec = property $ do
           [("x", map VBF16 xs), ("y", replicate n (VBF16 (BF16 0)))]
           0
   fmap (Map.lookup "y") got === Right (Just want)
+
+-- | The packed kernel gives what the scalar one does, bit for bit.
+packsSpec :: Property
+packsSpec = property $ do
+  packs <- forAll (Gen.int (Range.linear 1 40))
+  s <- forAll (Gen.float (Range.linearFracFrom 0 (-4) 4))
+  xs <- forAll (Gen.list (Range.singleton (8 * packs)) (BF16 <$> Gen.word16 Range.constantBounded))
+  let ys = replicate (8 * packs) (VBF16 (BF16 0))
+      scalar = runOn @T32 scale [("n", VU32 (fromIntegral (8 * packs))), ("s", VF32 s)] [("x", map VBF16 xs), ("y", ys)] 0
+      packed = runOn @T32 scalePacked [("packs", VU32 (fromIntegral packs)), ("s", VF32 s)] [("x", map VBF16 xs), ("y", ys)] 0
+  fmap (Map.lookup "y") packed === fmap (Map.lookup "y") scalar
 
 -- | y = 1 in the first three lanes of each SIMD group, 2 in the others.
 lanes :: forall t. (Target t, ThreadsOk t 64) => Kernel t
@@ -232,6 +246,17 @@ fromBy = kernel "from_by" $ do
     n <- var "n" 0
     forStep "i" start 4294967295 step $ \_ -> n .= get n + 1
     store y 0 (get n)
+
+-- | Reads the second pack of four from a buffer of four.
+pastEnd :: Kernel T32
+pastEnd = kernel "past_end" $ do
+  x <- buffer @ReadOnly @16 @Float "x" 4
+  y <- buffer @WriteOnly @16 @Float "y" 1
+  threads @32
+  groups 1
+  pure . pure $ do
+    v <- loadPack @4 "v" x 1
+    whenLane (threadIndex .== 0) (store y 0 (sum (unpack v)))
 
 -- | Stores x[i], of a buffer of four, to y[j], of a buffer of one.
 pastExtent :: Word32 -> Word32 -> Kernel T32

@@ -8,5 +8,5 @@ module BufferUnderAligned (oops) where
 
 import FuryKernel.Build
 
-oops :: Sig t (Buf ReadOnly 8 Float)
+oops :: Sig t (Buf t ReadOnly 8 Float)
 oops = buffer @ReadOnly @8 @Float "x" 64

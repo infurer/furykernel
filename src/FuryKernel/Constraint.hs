@@ -51,6 +51,17 @@ module FuryKernel.Constraint (
   PowerOfTwo,
   checkAlign,
 
+  -- * Packs
+  PackOk,
+  PackOkB,
+  PackNotBool,
+  PackSome,
+  PackPowerOfTwo,
+  PackWithin,
+  PackAligned,
+  checkPack,
+  withPack,
+
   -- * Totals, checked by the gate only
   checkTgTotal,
   checkBuffers,
@@ -63,13 +74,13 @@ import Data.Kind (Constraint, Type)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Type.Bool (type (&&))
+import Data.Type.Bool (Not, type (&&))
 import Data.Type.Equality (type (==))
 import FuryKernel.Finding (Finding (..), Rule (..))
 import FuryKernel.Target (Target (..), TargetCaps (..), targetCaps)
-import FuryKernel.Type (IsScalar (..), LeastAlign, ScalarType, leastAlign, scalarSize)
+import FuryKernel.Type (IsScalar (..), LeastAlign, ScalarType (..), leastAlign, scalarSize)
 import GHC.TypeError (Assert, ErrorMessage (..), TypeError)
-import GHC.TypeNats (Div, KnownNat, Mod, Nat, SomeNat (..), someNatVal, type (*), type (+), type (-), type (<=?))
+import GHC.TypeNats (Div, KnownNat, Mod, Nat, SomeNat (..), natVal, someNatVal, type (*), type (+), type (-), type (<=?))
 import Numeric.Natural (Natural)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -329,6 +340,144 @@ checkAlign subject t align =
       , (align >= leastAlign t, " for elements of " <> showT (scalarSize t) <> " B; the least is " <> showT (leastAlign t) <> " B.")
       ]
   ]
+
+------------------------------------------------------------------------------
+-- Packs
+
+-- | The rule's conditions: no bool, at least two elements, a power of two in size, within a lane load, aligned.
+type PackNotBool :: Type -> Bool
+type PackNotBool a = Not (a == Bool)
+
+type PackSome :: Nat -> Bool
+type PackSome n = 2 <=? n
+
+type PackPowerOfTwo :: Nat -> Type -> Bool
+type PackPowerOfTwo n a = PowerOfTwo (n * ByteSize a)
+
+type PackWithin :: Type -> Nat -> Type -> Bool
+type PackWithin t n a = n * ByteSize a <=? LaneLoadMax t
+
+type PackAligned :: Nat -> Type -> Nat -> Bool
+type PackAligned n a align = Divides (n * ByteSize a) align
+
+-- | A size the alignment is a multiple of: never 0.
+type Divides :: Nat -> Nat -> Bool
+type family Divides size align where
+  Divides 0 _ = 'False
+  Divides size align = Mod align size == 0
+
+-- | The rule as a 'Bool'.
+type PackOkB :: Type -> Nat -> Type -> Nat -> Bool
+type PackOkB t n a align =
+  PackNotBool a && PackSome n && PackPowerOfTwo n a && PackWithin t n a && PackAligned n a align
+
+{- | A pack of @n@ elements of @a@, loaded or stored by one lane at once
+from a buffer whose start is aligned to @align@ bytes, is legal on @t@.
+
+Packs are indexed in packs, not elements, so a pack is aligned to its size
+whenever the buffer's start is: the rule needs the size to divide the
+buffer's alignment, and to be a power of two no wider than the target's
+widest lane load.
+-}
+type PackOk :: Type -> Nat -> Type -> Nat -> Constraint
+class PackOk t n a align
+
+instance
+  ( Assert
+      (PackNotBool a)
+      (TypeError ('Text "No packs of bool: its layout in memory is the target's."))
+  , Assert
+      (PackSome n)
+      (TypeError ('Text "A pack needs at least two elements."))
+  , Assert
+      (PackPowerOfTwo n a)
+      ( TypeError
+          ( 'Text "Pack of "
+              ':<>: 'ShowType n
+              ':<>: 'Text " elements of "
+              ':<>: 'ShowType (ByteSize a)
+              ':<>: 'Text " B = "
+              ':<>: 'ShowType (n * ByteSize a)
+              ':<>: 'Text " B, which is not a power of two."
+          )
+      )
+  , Assert
+      (PackWithin t n a)
+      ( TypeError
+          ( 'Text "Pack of "
+              ':<>: 'ShowType n
+              ':<>: 'Text " elements of "
+              ':<>: 'ShowType (ByteSize a)
+              ':<>: 'Text " B = "
+              ':<>: 'ShowType (n * ByteSize a)
+              ':<>: 'Text " B; the widest lane load on "
+              ':<>: 'Text (TargetName t)
+              ':<>: 'Text " is "
+              ':<>: 'ShowType (LaneLoadMax t)
+              ':<>: 'Text " B."
+          )
+      )
+  , Assert
+      (PackAligned n a align)
+      ( TypeError
+          ( 'Text "Pack of "
+              ':<>: 'ShowType n
+              ':<>: 'Text " elements of "
+              ':<>: 'ShowType (ByteSize a)
+              ':<>: 'Text " B = "
+              ':<>: 'ShowType (n * ByteSize a)
+              ':<>: 'Text " B from a buffer aligned to "
+              ':<>: 'ShowType align
+              ':<>: 'Text " B: align it to a multiple of "
+              ':<>: 'ShowType (n * ByteSize a)
+              ':<>: 'Text " B."
+          )
+      )
+  ) =>
+  PackOk t n a align
+
+checkPack :: TargetCaps -> ScalarType -> Natural -> Natural -> [Finding]
+checkPack caps t n align =
+  [ Finding Packs msg
+  | (False, msg) <-
+      [ (t /= TBool, "No packs of bool: its layout in memory is the target's.")
+      , (n >= 2, "A pack needs at least two elements.")
+      , (powerOfTwo bytes, prefix <> ", which is not a power of two.")
+      ,
+        ( bytes <= caps.capLaneLoadMax
+        , prefix <> "; the widest lane load on " <> caps.capName <> " is " <> showT caps.capLaneLoadMax <> " B."
+        )
+      ,
+        ( bytes /= 0 && align `mod` bytes == 0
+        , if bytes == 0
+            then prefix <> " from a buffer aligned to " <> showT align <> " B: a pack of no bytes has nothing to align."
+            else
+              prefix
+                <> " from a buffer aligned to "
+                <> showT align
+                <> " B: align it to a multiple of "
+                <> showT bytes
+                <> " B."
+        )
+      ]
+  ]
+ where
+  size = fromIntegral (scalarSize t) :: Natural
+  bytes = n * size
+  prefix = "Pack of " <> showT n <> " elements of " <> showT size <> " B = " <> showT bytes <> " B"
+
+-- | Dynamic mode: run static-mode code for a pack width known at run time.
+withPack ::
+  forall t a align r.
+  (Target t, IsScalar a, KnownNat align) =>
+  Natural ->
+  (forall n. (KnownNat n, PackOk t n a align) => Proxy n -> r) ->
+  Either [Finding] r
+withPack n k = case checkPack (targetCaps @t) (scalarType @a) n (natVal (Proxy @align)) of
+  [] -> case someNatVal n of
+    SomeNat (p :: Proxy n) -> case vouch @(PackOk t n a align) of
+      Dict -> Right (k p)
+  findings -> Left findings
 
 ------------------------------------------------------------------------------
 -- Totals

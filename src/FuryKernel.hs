@@ -21,7 +21,7 @@ module FuryKernel (
 
 import FuryKernel.Build
 import FuryKernel.Check (Checked, check)
-import FuryKernel.Constraint (AlignOk, TgArrayOk, ThreadsOk, withTgArray, withThreads)
+import FuryKernel.Constraint (AlignOk, PackOk, TgArrayOk, ThreadsOk, withPack, withTgArray, withThreads)
 import FuryKernel.IR (DimRange (..), Name)
 import FuryKernel.Reduce
 import FuryKernel.Target (Target (..))

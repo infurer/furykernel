@@ -7,5 +7,5 @@ module StoreToReadOnly (oops) where
 
 import FuryKernel.Build
 
-oops :: Buf ReadOnly 16 Float -> K Uniform ()
+oops :: Buf t ReadOnly 16 Float -> K Uniform ()
 oops b = store b 0 1

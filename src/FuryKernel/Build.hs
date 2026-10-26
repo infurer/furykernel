@@ -11,7 +11,8 @@ A kernel has three phases, one monad each:
 
 * 'Sig': the interface. Dimensions with their ranges, scalar parameters
   (both in one parameter struct), buffers with their access, alignment and
-  extent, the threads per threadgroup and the size of the grid.
+  extent, the threads per threadgroup and the size of the grid. Buffers
+  carry the target, so that the body checks packs against it.
 * 'Scope': threadgroup memory, whose total in the kernel's layout
   ("FuryKernel.IR".'FuryKernel.IR.tgLayout') the gate checks.
 * 'K': the body, indexed by its 'Region': 'Uniform' where every thread of
@@ -23,6 +24,10 @@ Expressions are 'Exp', a typed wrapper around the IR. Storage types (bf16,
 i8, u8) have no arithmetic: a sum of two bf16 values does not compile.
 Sharing is explicit ('let_'), and every local is named by the author, so
 generated code reads like the kernel.
+
+A lane reads or writes consecutive elements at once as a 'Pack', indexed
+in packs: the access is aligned whenever the buffer is, and 'PackOk'
+checks the width against the target and the buffer's alignment.
 
 The gate ("FuryKernel.Check") re-checks everything the types promise, on
 the IR, and what they don't: the uniformity of conditions, the totals.
@@ -104,6 +109,10 @@ module FuryKernel.Build (
   (.=),
   load,
   store,
+  Pack,
+  unpack,
+  loadPack,
+  storePack,
   tgLoad,
   tgStore,
   barrier,
@@ -140,7 +149,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Word (Word32, Word8)
-import FuryKernel.Constraint (AlignOk, TgArrayOk, ThreadsOk)
+import FuryKernel.Constraint (AlignOk, PackOk, TgArrayOk, ThreadsOk)
 import FuryKernel.Finding (Finding (..), Rule (..))
 import FuryKernel.IR (Name)
 import FuryKernel.IR qualified as IR
@@ -573,14 +582,14 @@ instance KnownAccess WriteOnly where
 instance KnownAccess ReadWrite where
   accessOf = IR.ReadWrite
 
-{- | A device buffer of @a@ with access @acc@, whose start is aligned to
-@align@ bytes.
+{- | A device buffer of @a@ of a kernel for target @t@, with access @acc@,
+whose start is aligned to @align@ bytes.
 -}
-type Buf :: Access -> Nat -> Type -> Type
+type Buf :: Type -> Access -> Nat -> Type -> Type
 
-type role Buf nominal nominal nominal
+type role Buf nominal nominal nominal nominal
 
-newtype Buf acc align a = Buf Name
+newtype Buf t acc align a = Buf Name
 
 -- | A u32 dimension of the launch, in the parameter struct.
 dim :: Name -> IR.DimRange -> Sig t (Exp Word32)
@@ -605,7 +614,7 @@ buffer ::
   (KnownAccess acc, KnownNat align, IsScalar a, AlignOk a align) =>
   Name ->
   Exp Word32 ->
-  Sig t (Buf acc align a)
+  Sig t (Buf t acc align a)
 buffer n (Exp extent) = Sig $ do
   claim n
   let b' = IR.Buffer n (accessOf @acc) (scalarType @a) (natVal (Proxy @align)) extent
@@ -739,11 +748,53 @@ infix 1 .=
 (.=) :: Var a -> Exp a -> K r ()
 Var n .= Exp e = K (emit (IR.SAssign n e))
 
-load :: (Readable acc) => Buf acc align a -> Exp Word32 -> Exp a
+load :: (Readable acc) => Buf t acc align a -> Exp Word32 -> Exp a
 load (Buf n) (Exp i) = Exp (IR.ELoad n i)
 
-store :: (Writable acc) => Buf acc align a -> Exp Word32 -> Exp a -> K r ()
+store :: (Writable acc) => Buf t acc align a -> Exp Word32 -> Exp a -> K r ()
 store (Buf n) (Exp i) (Exp e) = K (emit (IR.SStore n i e))
+
+-- | @n@ consecutive elements of @a@, which one lane loads at once.
+type Pack :: Nat -> Type -> Type
+
+type role Pack nominal nominal
+
+newtype Pack n a = Pack [Exp a]
+
+-- | The elements, in order.
+unpack :: Pack n a -> [Exp a]
+unpack (Pack es) = es
+
+{- | @loadPack \@8 "wv" w j@: elements @8 j@ to @8 j + 7@ of @w@, read at
+once and bound to the locals @wv_0@ to @wv_7@.
+-}
+loadPack ::
+  forall n t acc align a r.
+  (Readable acc, KnownNat n, IsScalar a, PackOk t n a align) =>
+  Name ->
+  Buf t acc align a ->
+  Exp Word32 ->
+  K r (Pack n a)
+loadPack base (Buf b) (Exp j) = K $ do
+  names <- traverse (\i -> fresh (base <> "_" <> T.pack (show i))) [0 .. natVal (Proxy @n) - 1]
+  emit (IR.SLoadPack names (scalarType @a) b j)
+  pure (Pack (map (Exp . IR.EVar) names))
+
+{- | @storePack \@4 y j [a, b, c, d]@: elements @4 j@ to @4 j + 3@ of @y@,
+written at once.
+-}
+storePack ::
+  forall n t acc align a r.
+  (Writable acc, KnownNat n, PackOk t n a align) =>
+  Buf t acc align a ->
+  Exp Word32 ->
+  [Exp a] ->
+  K r ()
+storePack (Buf b) (Exp j) es = K $ do
+  let n = natVal (Proxy @n)
+  when (fromIntegral (length es) /= n) $
+    problem Typing ("A pack of " <> T.pack (show n) <> " stored to " <> b <> " with " <> T.pack (show (length es)) <> " values.")
+  emit (IR.SStorePack b j (map expIR es))
 
 tgLoad :: TgArr n a -> Exp Word32 -> Exp a
 tgLoad (TgArr n) (Exp i) = Exp (IR.ETgLoad n i)

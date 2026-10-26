@@ -20,7 +20,8 @@ What the model makes explicit:
   and maximum as IEEE 754's minimumNumber and maximumNumber, integer
   addition, subtraction, multiplication and negation wrapping around;
 * the stores of one statement land in an order drawn from the seed, so a
-  kernel whose lanes race to one address gives seed-dependent results;
+  kernel whose lanes race to one address gives seed-dependent results; a
+  lane's pack lands whole;
 * errors instead of undefined behaviour: accesses past what the kernel
   declares (a buffer's extent, a threadgroup array's size), however much
   the launch gives, dimensions outside their declared range, reads of
@@ -52,7 +53,7 @@ import Data.Array.Unsafe (unsafeFreeze)
 import Data.Bits (shiftR, xor, (.&.), (.|.))
 import Data.Int (Int32, Int8)
 import Data.IntSet qualified as IntSet
-import Data.List (sortOn)
+import Data.List (sortOn, transpose)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.STRef (STRef, modifySTRef', newSTRef, readSTRef)
@@ -249,6 +250,28 @@ stmt env grp active s = unless (null active) $ case s of
     forM_ ordered $ \(ix, v) -> do
       checkBounds a arr ix
       lift (writeArray arr (fromIntegral ix) $! Just $! v)
+  SLoadPack ns _ b i -> do
+    let width = toInteger (length ns)
+    arr <- maybe (throwE (MissingBuffer b)) pure (Map.lookup b env.envBuffers)
+    packs <- forM active $ \l -> do
+      j <- eval env grp l i >>= index
+      forM [j * width .. j * width + width - 1] $ \ix -> do
+        checkBounds b arr ix
+        lift (readArray arr (fromIntegral ix))
+    forM_ (zip ns (transpose packs)) $ \(n, vs) -> do
+      local' <- fresh n
+      forM_ (zip active vs) $ \(l, v) -> lift (writeArray local' l $! v)
+  SStorePack b i es -> do
+    let width = toInteger (length es)
+    writes <- forM active $ \l -> do
+      j <- eval env grp l i >>= index
+      vs <- forM es (eval env grp l)
+      pure (zip [j * width ..] vs)
+    arr <- maybe (throwE (MissingBuffer b)) pure (Map.lookup b env.envBuffers)
+    ordered <- shuffle writes
+    forM_ (concat ordered) $ \(ix, v) -> do
+      checkBounds b arr ix
+      lift (writeArray arr (fromIntegral ix) $! v)
   SIf _ c th el -> do
     conds <- forM active $ \l -> (l,) <$> (eval env grp l c >>= bool)
     block env grp [l | (l, True) <- conds] th
@@ -307,7 +330,7 @@ stmt env grp active s = unless (null active) $ case s of
     maybe (throwE (Internal ("local " <> n))) pure (Map.lookup n m)
   index v = toInteger <$> u32 v
   -- The stores of one statement, in an order drawn from the seed.
-  shuffle :: [(Integer, Value)] -> M s [(Integer, Value)]
+  shuffle :: [w] -> M s [w]
   shuffle writes = do
     count <- lift (readSTRef env.envStoreCount)
     lift (modifySTRef' env.envStoreCount (+ 1))

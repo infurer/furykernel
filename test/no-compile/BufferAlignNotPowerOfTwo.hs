@@ -8,5 +8,5 @@ module BufferAlignNotPowerOfTwo (oops) where
 
 import FuryKernel.Build
 
-oops :: Sig t (Buf WriteOnly 24 Float)
+oops :: Sig t (Buf t WriteOnly 24 Float)
 oops = buffer @WriteOnly @24 @Float "y" 64

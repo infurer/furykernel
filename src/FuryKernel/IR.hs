@@ -279,6 +279,13 @@ data Stmt
     SStore Name Expr Expr
   | -- | Threadgroup array, index, value.
     STgStore Name Expr Expr
+  | {- | Locals bound to a pack: consecutive elements of a buffer, which a
+    lane reads at once. The locals, their type, the buffer and the index
+    in packs: local @i@ is element @index * n + i@, for @n@ locals.
+    -}
+    SLoadPack [Name] ScalarType Name Expr
+  | -- | Buffer, index in packs, the values: a pack written at once.
+    SStorePack Name Expr [Expr]
   | -- | The declared uniformity of the condition, the condition, then, else.
     SIf Region Expr [Stmt] [Stmt]
   | {- | The declared uniformity of the loop's control, the loop variable
@@ -429,6 +436,22 @@ stmt depth = \case
   SAssign n e -> [pad <> n <> " = " <> renderExpr e]
   SStore b i e -> [pad <> b <> "[" <> renderExpr i <> "] = " <> renderExpr e]
   STgStore a i e -> [pad <> a <> "[" <> renderExpr i <> "] = " <> renderExpr e]
+  SLoadPack ns t b i ->
+    [ pad
+        <> "let ("
+        <> T.intercalate ", " ns
+        <> ") : "
+        <> scalarTypeName t
+        <> " = "
+        <> b
+        <> ".pack"
+        <> showT (length ns)
+        <> "["
+        <> renderExpr i
+        <> "]"
+    ]
+  SStorePack b i es ->
+    [pad <> b <> ".pack" <> showT (length es) <> "[" <> renderExpr i <> "] = (" <> T.intercalate ", " (map renderExpr es) <> ")"]
   SIf r c th el ->
     [pad <> "if " <> region r <> " " <> renderExpr c <> " {"]
       <> concatMap (stmt (depth + 1)) th

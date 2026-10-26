@@ -74,12 +74,12 @@ nix fmt && git diff --exit-code &&
     define the instances; the core defines none.
   - `FuryKernel.Constraint`: each resource rule twice, as a type family for
     static mode and as a term decider for the gate and dynamic mode, which
-    reflects runtime numbers into the static constraints. Each condition is
-    a named family that both the rule's `Bool` form and its enforced
-    constraint are built from. Their messages carry the arithmetic.
-    A threadgroup array takes its size rounded up to its alignment; an
-    alignment in device memory is a power of two, at least 16 B and the
-    element size.
+    reflects runtime numbers into the static constraints: threads,
+    threadgroup arrays, packs. Each condition is a named family that both
+    the rule's `Bool` form and its enforced constraint are built from. Their
+    messages carry the arithmetic. A threadgroup array takes its size rounded
+    up to its alignment; an alignment in device memory is a power of two,
+    at least 16 B and the element size.
     `FuryKernel.Finding`: what the rules report, a rule and a message
     (`Finding`), and where one has a place, the kernel or program and the
     place in it (`locatedAt`); fields that come later leave both as they
@@ -111,6 +111,9 @@ nix fmt && git diff --exit-code &&
     (`AllThreads`), SIMD-group operations every lane (`Converged`), loads
     and stores the right access; each refusal has its own message.
     Locals are named by the author (`let_`, `var`) and stay named.
+    Buffers carry their target, for the pack rule: `loadPack` and
+    `storePack` move a `Pack` of consecutive elements at once, indexed in
+    packs, so a pack is aligned whenever its buffer is.
   - `FuryKernel.Check`: the gate. `check` returns a `Checked` kernel, whose
     constructor is private, or the findings; backends take only `Checked`
     kernels. A kernel keeps the caps of the target it was built for, and
@@ -123,8 +126,8 @@ nix fmt && git diff --exit-code &&
     loop bound (a threadgroup load as uniform as its index where no store
     to its array can run in its barrier epoch, every side of every if and
     pass of every loop counted, as a reduction's result is; any other
-    divergent), the regions of barriers and SIMD-group operations, and the
-    resources.
+    divergent), the regions of barriers and SIMD-group operations, the
+    resources and the packs.
     A finding carries its place (`findingLocation`): its kernel, and the
     ifs and loops around what it is about.
   - `FuryKernel.Check.Launch`: launch sizes over the dimensions' legal
@@ -193,8 +196,8 @@ nix fmt && git diff --exit-code &&
   integers narrowed clamped and wrapped, and minimum and
   maximum up to what the IR leaves to a target, compared by class; a
   threadgroup sum of -0s is -0.
-  The IR's text, golden, for straight lines, an if, a SIMD-group sum and
-  threadgroup memory; one kernel's IR and ABI hashes pinned.
+  The IR's text, golden, for straight lines, packs, an if, a SIMD-group sum
+  and threadgroup memory; one kernel's IR and ABI hashes pinned.
   Kernels run on the interpreter against f64 specifications: an RMSNorm
   within one bf16 ulp on every SIMD width, and bitwise batch-invariant.
   `test/no-compile/`: programs static mode must reject, each at one

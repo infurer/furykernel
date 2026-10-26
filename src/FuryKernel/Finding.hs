@@ -33,6 +33,10 @@ data Rule
     16 B and the element size.
     -}
     Alignment
+  | {- | Packs: at least two elements, a power of two in size, no wider than
+    a lane loads, from buffers aligned to them.
+    -}
+    Packs
   | -- | Names: unique, and valid identifiers in every target language.
     Names
   | -- | Well-typed expressions and statements.

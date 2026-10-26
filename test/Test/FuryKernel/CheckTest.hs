@@ -173,6 +173,41 @@ tests =
               , "The index into buffer out is f32, not u32."
               , "Add of bf16."
               ]
+    , testCase "packs: width and alignment against the target" $ do
+        let packed buffers body = checkIR (targetCaps @T32) (base body) {kernelBuffers = buffers}
+            src = Buffer "src" ReadOnly TF32 16 (ELit (LU32 64))
+            out8 = Buffer "out" ReadWrite TF32 8 (ELit (LU32 64))
+        packed [src] [SLoadPack ["a", "b", "c", "d"] TF32 "src" (lu 1)] @?= []
+        map
+          (.findingMessage)
+          (packed [src, out8] [SLoadPack ["a", "b", "c", "d"] TF32 "out" (lu 1), SStorePack "out" (lu 0) (map f32 [1, 2, 3, 4])])
+          @?= [ "Buffer out: an alignment of 8 B for elements of 4 B; the least is 16 B."
+              , "Pack of 4 elements of 4 B = 16 B from a buffer aligned to 8 B: align it to a multiple of 16 B."
+              ]
+        map (.findingRule) (packed [src] [SLoadPack (map (T.pack . ("v" <>) . show) [0 .. 7 :: Int]) TF32 "src" (lu 0)])
+          @?= [Packs, Packs]
+    , testCase "packs: of no elements, asked no alignment" $ do
+        let src = Buffer "src" ReadOnly TF32 16 (ELit (LU32 64))
+        [f.findingMessage | f <- checkIR (targetCaps @T32) (base [SLoadPack [] TF32 "src" (lu 0)]) {kernelBuffers = [src]}, f.findingRule == Packs]
+          @?= ["A pack needs at least two elements.", "Pack of 0 elements of 4 B = 0 B, which is not a power of two.", "Pack of 0 elements of 4 B = 0 B from a buffer aligned to 16 B: a pack of no bytes has nothing to align."]
+    , testCase "packs: typing" $
+        map
+          (.findingMessage)
+          ( checkIR
+              (targetCaps @T32)
+              (base [SLoadPack ["a", "b"] TU32 "src" (lu 0), SStorePack "src" (lu 0) [f32 1, ELit (LU32 2)]])
+                { kernelBuffers = [Buffer "src" ReadOnly TF32 16 (ELit (LU32 64))]
+                }
+          )
+          @?= [ "A pack of u32 loaded from src, a buffer of f32."
+              , "A store to the read-only buffer src."
+              , "A value stored to src is u32, not f32."
+              ]
+    , testCase "packs: as uniform as their index, from a buffer nobody writes" $ do
+        let uniformIf = SIf RUniform (EBin Lt (EVar "a") (f32 1)) [] []
+            withSource acc = (base [SLoadPack ["a", "b"] TF32 "src" (lu 0), uniformIf]) {kernelBuffers = [Buffer "src" acc TF32 16 (ELit (LU32 64))]}
+        checkIR (targetCaps @T32) (withSource ReadOnly) @?= []
+        map (.findingRule) (checkIR (targetCaps @T32) (withSource ReadWrite)) @?= [Uniformity]
     , testCase "names" $
         map
           (.findingMessage)
