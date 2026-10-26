@@ -58,6 +58,8 @@ module FuryKernel.Build (
   logE,
   tanhE,
   fmaE,
+  quotE,
+  remE,
   widen,
   narrow,
   narrowClamped,
@@ -65,6 +67,7 @@ module FuryKernel.Build (
   toF32,
   NumScalar,
   SimdScalar,
+  IntScalar,
   FloatScalar,
   Comparable,
   Widen,
@@ -460,6 +463,21 @@ nothing else: @a * b + c@ written so rounds twice.
 -}
 fmaE :: (FloatScalar a) => Exp a -> Exp a -> Exp a -> Exp a
 fmaE (Exp a) (Exp b) (Exp c) = Exp (IR.EFma a b c)
+
+-- | The integer compute types.
+type IntScalar :: Type -> Constraint
+class (NumScalar a) => IntScalar a
+
+instance IntScalar Int32
+
+instance IntScalar Word32
+
+{- | Integer division, rounding toward zero, and its remainder. A zero
+divisor is undefined on the targets, and an error in the interpreter.
+-}
+quotE, remE :: (IntScalar a) => Exp a -> Exp a -> Exp a
+quotE = bin IR.Div
+remE = bin IR.Rem
 
 -- | Exact conversions to a wider type.
 type Widen :: Type -> Type -> Constraint

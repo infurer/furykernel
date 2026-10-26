@@ -53,11 +53,13 @@ library
     FuryKernel.Constraint
     FuryKernel.Finding
     FuryKernel.IR
+    FuryKernel.Interp
     FuryKernel.Numerics
     FuryKernel.Target
     FuryKernel.Type
 
   build-depends:
+    array >=0.5 && <0.6,
     base >=4.21 && <5,
     containers >=0.7 && <0.8,
     text >=2.1 && <2.2,
@@ -72,6 +74,7 @@ test-suite furykernel-test
     Test.FuryKernel.BuildTest
     Test.FuryKernel.CheckTest
     Test.FuryKernel.ConstraintTest
+    Test.FuryKernel.InterpTest
     Test.FuryKernel.Kernels
     Test.FuryKernel.NumericsTest
     Test.FuryKernel.Targets
@@ -83,6 +86,7 @@ test-suite furykernel-test
 
   build-depends:
     base,
+    containers,
     furykernel,
     hedgehog >=1.5 && <1.6,
     tasty >=1.5 && <1.6,

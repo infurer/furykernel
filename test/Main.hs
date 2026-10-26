@@ -9,6 +9,7 @@ import Hedgehog.Internal.Seed qualified as Seed
 import Test.FuryKernel.BuildTest qualified as BuildTest
 import Test.FuryKernel.CheckTest qualified as CheckTest
 import Test.FuryKernel.ConstraintTest qualified as ConstraintTest
+import Test.FuryKernel.InterpTest qualified as InterpTest
 import Test.FuryKernel.NumericsTest qualified as NumericsTest
 import Test.Tasty (adjustOption, defaultMain, testGroup)
 import Test.Tasty.Hedgehog (HedgehogReplay (..))
@@ -26,4 +27,5 @@ main =
       , ConstraintTest.tests
       , BuildTest.tests
       , CheckTest.tests
+      , InterpTest.tests
       ]

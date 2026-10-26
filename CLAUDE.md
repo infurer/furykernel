@@ -136,12 +136,33 @@ nix fmt && git diff --exit-code &&
     and a refusal names the values that break it (or the boxes, 4096 of
     them, that could not settle it). The same search gives a grid's fewest
     threadgroups (`lowest`).
+  - `FuryKernel.Interp`: the SIMT interpreter, the reference the kernels'
+    specifications are checked with. Lanes run in lockstep with active
+    masks; arithmetic is the IR's (binary16 rounded per operation, RNE
+    narrowing of floats, fma exact and rounded once, rsqrt, exp, log and
+    tanh in binary64 and rounded once, binary16 not through binary32,
+    integers narrowed clamped or wrapped, NaNs widened
+    quiet, minimum and maximum as IEEE 754-2019's minimumNumber and
+    maximumNumber with -0 below +0 and two NaNs' quiet NaN, i32 and u32
+    addition, subtraction and multiplication wrapping around, SIMD-group
+    reductions pairwise, neighbours first, both operands of And and Or
+    and both sides of a select evaluated); the stores of a statement land in a
+    seeded order, so races show; undefined behaviour is an error: accesses
+    past what the kernel declares, however much the launch gives,
+    dimensions outside their range, integer division by zero or overflow.
 - `test/`: the test suite, tasty with hedgehog properties, all from one
   seed unless `--hedgehog-replay` gives another. Conversions are
   checked exhaustively where the domain is 16 bits wide, and otherwise
   against exact `Rational` arithmetic. Test targets have SIMD widths from 8
   to 64. Each rule's conditions, as named families and in the decider, are
   checked to agree on sample points.
+  The interpreter at its edges: SIMD-group sums in their pairwise order,
+  neighbours first (ones at lanes 16 and 17 tell it from lane order and
+  from xor 16 first), in f32 and f16; fma exact, at ties, subnormals and
+  IEEE 754's special cases; rsqrt, exp, log and tanh rounded once from
+  binary64, over every binary16 and where macOS's binary32 exp misrounds;
+  integers narrowed clamped and wrapped, and minimum and
+  maximum up to what the IR leaves to a target, compared by class.
   The IR's text, golden, for straight lines, an if, a SIMD-group sum and
   threadgroup memory.
   `test/no-compile/`: programs static mode must reject, each at one
