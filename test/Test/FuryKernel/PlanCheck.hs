@@ -319,6 +319,7 @@ elementwise = \case
   GeluMul {} -> True
   Softcap {} -> True
   KvStore {} -> True
+  Standardize {} -> True
   _ -> False
 
 -- | The caches an attention reads, and the one a store writes.

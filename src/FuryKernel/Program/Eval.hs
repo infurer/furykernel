@@ -515,6 +515,15 @@ evaluateWith kept checked b = do
         o
         [listArray (0, width - 1) [sum [wa ! (token * width + j) | token <- tokens] * f | j <- [0 .. width - 1]] | tokens <- toks]
         [boundsArr [gatherA [wa ! (token * width + j) | token <- tokens] f | j <- [0 .. width - 1]] | tokens <- toks]
+    (Standardize biasSrc scaleSrc f x, [o]) -> do
+      bias <- weightOf biasSrc
+      scale <- weightOf scaleSrc
+      xs <- valueOf env x
+      as <- approxOf env x
+      put
+        o
+        [arr [(f * v - bias ! j) * scale ! j | (j, v) <- zip [0 ..] (elemsOf xr)] | xr <- xs]
+        [boundsArr [productA [sumA [productA [constA f, u], negA (exactA (bias ! j))], exactA (scale ! j)] | (j, u) <- zip [0 ..] ar] | ar <- as]
     (ArgMax x, [o]) -> do
       xs <- valueOf env x
       as <- approxOf env x

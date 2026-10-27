@@ -453,8 +453,11 @@ tests =
         assertBool "a concatenation of other segments passed" (isLeft (checkProgram badConcat))
     , testCase "the evaluator: a rotary embedding of two axes turns each half of a head by its own position" evalAxialRope
     , testCase "the evaluator: a gather of several rows sums them, times its factor" evalPooledGather
-    , testCase "the gate refuses a rotary embedding of two axes over one position" $
+    , testCase "the evaluator: standardizing scales, subtracts the bias and scales again" evalStandardize
+    , testCase "the gate refuses a rotary embedding of two axes over one position, and weights not a row wide" $ do
         assertBool "two axes over one position passed" (isLeft (checkProgram (axialRope 1)))
+        assertBool "a bias of another width passed" (isLeft (checkProgram (standardized 3)))
+        findings (withOp (\case Standardize b s _ v -> Standardize b s (1 / 0) v; op -> op) (standardized 2)) @?= [Finding Shapes "y: its factor isn't finite."]
     , testCase "the planner stores a gather of several rows before the linear layer that reads it" $
         fmap (map (.stepName) . (.planSteps) . plan defaultPlanOptions) (checkProgram pooled)
           @?= Right ["s0_pooled", "s1_gemv"]
@@ -967,7 +970,7 @@ bound or at it, the step's rows as given or one more.
 -}
 evalTotal :: Property
 evalTotal = property $ do
-  prog <- forAllWith (T.unpack . (.programName)) (Gen.element (planned <> [routedOver 8 8, axialRope 2, overRing 4 Nothing 4]))
+  prog <- forAllWith (T.unpack . (.programName)) (Gen.element (planned <> [routedOver 8 8, axialRope 2, standardized 2, overRing 4 Nothing 4]))
   m <- forAll (Gen.int (Range.linear 0 3))
   b <- forAllWith describe (bindingsOf m prog)
   r <- evalIO (E.try (E.evaluate (forced (evaluate (checked prog) b))))
@@ -1547,6 +1550,24 @@ evalPooledGather = do
           , bindRowInts = Map.fromList [("rows", [[0, 1], [2, 3]])]
           }
   fmap (Map.lookup "summed" . (.evalOutputs)) (evaluate (checked p) b) @?= Right (Just [[2, 3], [6, 7]])
+
+-- | Rows of 2 standardized by a bias as wide as given.
+standardized :: Natural -> Program
+standardized width = program "standardized" $ do
+  x <- input "x" (wholeRow 2) TF32
+  bias <- weight "bias" [width]
+  scale <- weight "scale" [2]
+  y <- standardize "y" bias scale 2 x
+  output "y" y
+
+evalStandardize :: IO ()
+evalStandardize = do
+  let b =
+        (bindings 2)
+          { bindInputs = Map.fromList [("x", [[1, 2], [3, 4]])]
+          , bindWeights = Map.fromList [("bias", [1, 1]), ("scale", [2, 3])]
+          }
+  fmap (Map.lookup "y" . (.evalOutputs)) (evaluate (checked (standardized 2)) b) @?= Right (Just [[2, 9], [10, 21]])
 
 roundingAgrees :: Property
 roundingAgrees = property $ do

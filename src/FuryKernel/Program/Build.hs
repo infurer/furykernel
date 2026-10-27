@@ -44,6 +44,7 @@ module FuryKernel.Program.Build (
   kvStore,
   attend,
   gather,
+  standardize,
   argmax,
 
   -- * Outputs
@@ -267,6 +268,10 @@ gather name t tok f = one name (Gather t.srcId tok.srcId f) (wholeRow width) TF3
   width = case t.srcKind of
     SWeight [_, w] _ _ -> w
     _ -> 0
+
+-- | @(factor · x − bias) · scale@, elementwise, the weights a row wide.
+standardize :: Name -> Src -> Src -> Double -> Val -> P Val
+standardize name b s f x = one name (Standardize b.srcId s.srcId f x.valId) x.valShape TF32
 
 argmax :: Name -> Val -> P Val
 argmax name x = one name (ArgMax x.valId) (wholeRow 1) TU32

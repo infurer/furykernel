@@ -332,6 +332,12 @@ shapes p = reverse (execState (mapM_ node p.programNodes >> outputs) (St Map.emp
         bounded tok rows ("the " <> showT rows <> " rows of " <> t.sourceName)
         shaped o (wholeRow cols) TF32
       Nothing -> expect False (t.sourceName <> " is not a two-dimensional weight")
+    (Standardize _ _ factor _, [x], [b, s], [o]) -> do
+      f32 x
+      expect (finite factor) "its factor isn't finite"
+      expect (weight1 b == Just x.valueShape.shapeWidth) (b.sourceName <> " is not a weight a row wide")
+      expect (weight1 s == Just x.valueShape.shapeWidth) (s.sourceName <> " is not a weight a row wide")
+      shaped o x.valueShape TF32
     (ArgMax _, [x], [], [o]) -> do
       f32 x
       whole x

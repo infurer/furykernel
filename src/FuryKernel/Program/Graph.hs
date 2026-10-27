@@ -318,6 +318,10 @@ data Op
     embedding; more, for a pooled set of rows), times a constant factor.
     -}
     Gather SourceId SourceId Double
+  | {- | @(factor · x − bias) · scale@, elementwise: the bias and the scale
+    are weights a row wide.
+    -}
+    Standardize SourceId SourceId Double ValueId
   | -- | The index of the row's largest element, ties to the lowest.
     ArgMax ValueId
   deriving stock (Eq, Show)
@@ -341,6 +345,7 @@ opValues = \case
   KvStore _ x -> [x]
   Attend _ q _ -> [q]
   Gather {} -> []
+  Standardize _ _ _ x -> [x]
   ArgMax x -> [x]
 
 -- | The sources an operation reads or, for a cache, writes.
@@ -362,6 +367,7 @@ opSources = \case
   KvStore (StoreAt c p s) _ -> [c, p, s]
   Attend _ _ (AttendTo k v p s) -> [k, v, p, s]
   Gather t tok _ -> [t, tok]
+  Standardize b s _ _ -> [b, s]
   ArgMax _ -> []
 
 ------------------------------------------------------------------------------
@@ -477,6 +483,7 @@ renderProgram p =
         <> double a.attnScale
         <> ")"
     Gather t tok f -> "gather(" <> src t <> ", " <> src tok <> ", factor " <> double f <> ")"
+    Standardize b s f x -> "standardize(" <> value x <> ", " <> src b <> ", " <> src s <> ", factor " <> double f <> ")"
     ArgMax x -> "argmax(" <> value x <> ")"
   double d = "f64:0x" <> T.pack (showHex (castDoubleToWord64 d) "")
   -- The parameters with one value so far print as nothing.
