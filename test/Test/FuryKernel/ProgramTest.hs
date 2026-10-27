@@ -46,6 +46,13 @@ tests =
     , testCase "a layer with keys as values plans the same, without the value projection" $
         fmap (map (.stepName) . (.planSteps) . plan defaultPlanOptions) (checkProgram (layer True))
           @?= Right ["s0_gemv", "s1_store", "s2_attend", "s3_combine", "s4_gemv", "s5_gemv", "s6_gemv", "s7_gemv", "s8_x2"]
+    , testCase "asked to, the planner stores a layer's GELUs before the anchors that read them" $ do
+        let names o = fmap (map (.stepName) . (.planSteps) . plan o) (checkProgram (layer False))
+        names defaultPlanOptions {optStoreGelus = True}
+          @?= Right ["s0_gemv", "s1_store", "s2_attend", "s3_combine", "s4_gemv", "s5_gemv", "s6_mlp_act", "s7_gemv", "s8_experts_act", "s9_gemv", "s10_x2"]
+        -- Gated, the dense MLP's beside the route, in the light step that stores it.
+        names defaultPlanOptions {optGated = True, optStoreGelus = True}
+          @?= Right ["s0_gemv", "s1_store", "s2_attend", "s3_combine", "s4_gemv", "s5_gemv", "s6_route_ids", "s7_gemv", "s8_gemv", "s9_experts_act", "s10_gemv", "s11_x2"]
     , testCase "gated, the experts wait for a stored route" $
         fmap (map (.stepName) . (.planSteps) . plan defaultPlanOptions {optGated = True}) (checkProgram (layer False))
           @?= Right ["s0_gemv", "s1_store", "s2_attend", "s3_combine", "s4_gemv", "s5_gemv", "s6_route_ids", "s7_gemv", "s8_gemv", "s9_gemv", "s10_x2"]
@@ -656,9 +663,10 @@ isLand = \case
 -- | Every set of the planner's options.
 optionSets :: [PlanOptions]
 optionSets =
-  [ defaultPlanOptions {optHorizontal = h, optGated = g, optSequenceRows = r}
+  [ defaultPlanOptions {optHorizontal = h, optGated = g, optStoreGelus = s, optSequenceRows = r}
   | h <- [True, False]
   , g <- [False, True]
+  , s <- [False, True]
   , r <- [1, 64]
   ]
 

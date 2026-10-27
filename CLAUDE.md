@@ -311,7 +311,9 @@ nix fmt && git diff --exit-code &&
     threadgroups of a step made; light steps hold stores into caches,
     attention's combine (once: its step stores what later steps read
     and makes the outputs that need nothing more) and the outputs no
-    anchor computes. A store into
+    anchor computes. Asked to
+    (`optStoreGelus`), a plan stores a GELU an anchor reads first, by a
+    light step. A store into
     a ring without room for a step's rows of one sequence
     (`optSequenceRows`) past the positions a row reads is staged: a light
     step keeps its values, the attention reads the step's own positions

@@ -19,7 +19,10 @@ Within a step a threadgroup has only what it computes itself.
   stored row, elementwise work, a route from stored logits. An anchor
   reads its input through them, never stored. A value whose recomputation
   takes a pass over a row and that more than this step needs is stored by
-  the step that computes it first, once.
+  the step that computes it first, once. Asked to ('optStoreGelus'), a
+  plan stores a GELU an anchor reads first, by a light step: a linear
+  layer's threadgroups would each recompute it for their outputs, a tanh
+  an element each time.
 * __Epilogues__ run on a linear layer's tile: elementwise work on its
   outputs. Attention's tile holds its splits' partials, which nothing but
   its combine reads.
@@ -241,6 +244,12 @@ data PlanOptions = PlanOptions
   ids of routes the program outputs, which the engine reads then too: a
   prediction of a later layer's experts, say.
   -}
+  , optStoreGelus :: Bool
+  {- ^ A GELU an anchor reads is stored first, by a light step, not
+  recomputed for every output of the anchor: worth a launch where a
+  linear layer's tiles are a few rows of outputs each, a vector's
+  product.
+  -}
   , optSequenceRows :: Natural
   {- ^ The most rows of one sequence a step holds, at consecutive
   positions: a store into a ring without room for them past what a row
@@ -251,7 +260,7 @@ data PlanOptions = PlanOptions
 
 -- | A step of one row per sequence, as decode's.
 defaultPlanOptions :: PlanOptions
-defaultPlanOptions = PlanOptions {optHorizontal = True, optGated = False, optSequenceRows = 1}
+defaultPlanOptions = PlanOptions {optHorizontal = True, optGated = False, optStoreGelus = False, optSequenceRows = 1}
 
 {- | How many rows of one sequence, at consecutive positions, a step can
 store into a ring of this length before an attention reads it, with this
@@ -519,10 +528,12 @@ plan opts checked = Plan p (map finish (toList final.closed))
     -- An anchor that needs the open step's tiles waits for the step to end.
     tiled <- or <$> traverse touchesOpen ins
     when tiled closeOpen
-    -- Inputs too dear to recompute, and gated routes, are stored first.
+    -- Inputs too dear to recompute, and gated routes, are stored first;
+    -- and GELUs, if asked.
     forM_ ins $ \v -> do
       dear <- expensive v
-      when dear (materialize v)
+      gelu <- storedGelu v
+      when (dear || gelu) (materialize v)
     case n.nodeOp of
       LinearRouted _ ids _ | opts.optGated -> do
         a <- availOf ids
@@ -570,6 +581,22 @@ plan opts checked = Plan p (map finish (toList final.closed))
                 AVirtual _ | Just n <- Map.lookup v producer -> go (Set.insert v seen) (opValues n.nodeOp <> vs)
                 _ -> go (Set.insert v seen) vs
     go Set.empty [v0]
+
+  -- Whether a value is a GELU to store before the anchor that reads it.
+  storedGelu :: ValueId -> State PS Bool
+  storedGelu v
+    | opts.optStoreGelus
+    , Just n <- Map.lookup v producer
+    , isGelu n.nodeOp =
+        availOf v >>= \case
+          AVirtual _ -> pure True
+          _ -> pure False
+    | otherwise = pure False
+   where
+    isGelu = \case
+      GeluMul {} -> True
+      GatedGelu {} -> True
+      _ -> False
 
   -- Whether recomputing a value would repeat attention's combine.
   expensive :: ValueId -> State PS Bool
