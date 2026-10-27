@@ -148,6 +148,7 @@ module FuryKernel.Build (
   simdGroupCount,
   simdWidth,
   simdGroups,
+  knownMultiple,
   note,
   f32,
 ) where
@@ -157,7 +158,7 @@ import Control.Monad.Trans.State.Strict (State, execState, gets, modify', state)
 import Data.Foldable (find, toList)
 import Data.Int (Int32, Int8)
 import Data.Kind (Constraint, Type)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
@@ -1106,6 +1107,16 @@ preconditions while they build, by a rule of "FuryKernel.Finding".
 -}
 note :: Rule -> T.Text -> K r ()
 note r msg = K (problem r msg)
+
+{- | What a u32 expression is known to be a multiple of from its form, for
+checks while building: a literal, its value; a dimension, its declared
+multiple. Nothing for any other form.
+-}
+knownMultiple :: Exp Word32 -> K r (Maybe Natural)
+knownMultiple (Exp e) = K $ case e of
+  IR.ELit (IR.LU32 n) -> pure (Just (fromIntegral n))
+  IR.EParam n -> gets (\b -> listToMaybe [r.dimMultipleOf | p <- toList b.params, p.paramName == n, IR.Dim r <- [p.paramRole]])
+  _ -> pure Nothing
 
 -- | SIMD groups per threadgroup, as a number, for checks while building.
 simdGroups :: K r Natural

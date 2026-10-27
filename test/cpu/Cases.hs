@@ -42,6 +42,7 @@ import FuryKernel.IR qualified as IR
 import FuryKernel.Interp (RunError (..), Value (..), launch, run, withSeed, withTables)
 import FuryKernel.Numerics (narrowBF16, narrowF16, widenF16)
 import GHC.Float (castFloatToWord32, castWord32ToFloat)
+import GHC.TypeNats (KnownNat)
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (getArgs)
 import Test.FuryKernel.Gemv (GemvShape (..), GemvVariant (..), gemv)
@@ -90,6 +91,8 @@ cases =
        , gemmCase "gemm_f16" (checked "gemm_f16" (gemm @F16)) (f16s 30) (f16s 31)
        , gemmCase "gemm_f32" (checked "gemm_f32" (gemm @Float)) (f32s 30) (f32s 31)
        , gemmCase "staged" (checked "staged" staged) (bf16s 32) (bf16s 33)
+       , tileCase "tiled" (checked "tiled" (tiled @1024 @1024 @4096 (GemmTile 64 64 16 4))) (70, 72, 48)
+       , tileCase "tiled_narrow" (checked "tiled_narrow" (tiled @1024 @2048 @2048 (GemmTile 32 64 32 1))) (70, 72, 64)
        , arithF32Case
        , arithF16Case
        , fmaF32Case
@@ -117,6 +120,7 @@ cases =
         m = fromIntegral sh.batch
      in Case name (checked name k) [Inputs [] [("x", bf16s 20 (m * ins)), ("w", bf16s 21 (outs * ins)), ("y", bf16Zeros (m * outs))] []] []
   gemmCase name k a b = Case name k [Inputs [("k", u 64)] [("a", a (16 * 64)), ("b", b (16 * 64)), ("c", zeros 256)] []] []
+  tileCase name k (m, n, kk) = Case name k [Inputs [("m", u m), ("n", u n), ("k", u kk)] [("a", bf16s 40 (m * kk)), ("b", bf16s 41 (n * kk)), ("c", zeros (m * n))] []] []
 
 ------------------------------------------------------------------------------
 -- Kernels
@@ -182,6 +186,38 @@ staged = kernel "staged" $ do
         fragMma acc fa fb acc
         barrier
       fragStore c (row0 * 16 + col0) 16 acc
+
+-- | C = A · Bᵀ of bf16 rows through a GEMM tile, edges clamped.
+tiled :: forall na nb nc. (TgArrayOk Cpu na Float, TgArrayOk Cpu nb Float, TgArrayOk Cpu nc Float, KnownNat na, KnownNat nb, KnownNat nc) => GemmTile -> Kernel Cpu
+tiled t = kernel "tiled" $ do
+  m <- dim "m" (DimRange 1 256 1)
+  n <- dim "n" (DimRange 8 256 8)
+  k <- dim "k" (DimRange t.gtStep 256 t.gtStep)
+  a <- buffer @ReadOnly @16 @BF16 "a" (m * k)
+  b <- buffer @ReadOnly @16 @BF16 "b" (n * k)
+  c <- buffer @WriteOnly @16 @Float "c" (m * n)
+  threads @256
+  let rows = fromIntegral t.gtRows
+      cols = fromIntegral t.gtCols
+  groups (((m + rows - 1) `quotE` rows) * ((n + cols - 1) `quotE` cols))
+  pure $ do
+    aSlice <- tgArray @na @Float "a_slice"
+    bSlice <- tgArray @nb @Float "b_slice"
+    cTile <- tgArray @nc @Float "c_tile"
+    pure $ do
+      tilesN <- let_ "tiles_n" ((n + cols - 1) `quotE` cols)
+      row0 <- let_ "row0" ((groupIndex `quotE` tilesN) * rows)
+      col0 <- let_ "col0" ((groupIndex `remE` tilesN) * cols)
+      gemmTile
+        "t"
+        t
+        aSlice
+        bSlice
+        cTile
+        k
+        (\r p -> pure (widen @Float (load a (minE (row0 + r) (m - 1) * k + p))))
+        (\col p -> pure (widen @Float (load b (minE (col0 + col) (n - 1) * k + p))))
+        (\r col v -> whenLane (row0 + r .< m .&& col0 + col .< n) (store c ((row0 + r) * n + col0 + col) v))
 
 -- | Every f32 operation on pairs of elements.
 arithF32 :: Kernel Cpu

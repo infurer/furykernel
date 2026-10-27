@@ -20,6 +20,7 @@ import Test.FuryKernel.NumericsTest qualified as NumericsTest
 import Test.FuryKernel.ProgramTest qualified as ProgramTest
 import Test.FuryKernel.ReduceTest qualified as ReduceTest
 import Test.FuryKernel.SelectionTest qualified as SelectionTest
+import Test.FuryKernel.TileTest qualified as TileTest
 import Test.FuryKernel.VariantTest qualified as VariantTest
 import Test.Tasty (adjustOption, defaultMain, testGroup)
 import Test.Tasty.Hedgehog (HedgehogReplay (..))
@@ -39,6 +40,7 @@ main =
       , CheckTest.tests
       , InterpTest.tests
       , FragmentTest.tests
+      , TileTest.tests
       , ReduceTest.tests
       , GemvTest.tests
       , VariantTest.tests

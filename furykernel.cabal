@@ -70,6 +70,7 @@ library
     FuryKernel.Reduce
     FuryKernel.Selection
     FuryKernel.Target
+    FuryKernel.Tile
     FuryKernel.Type
     FuryKernel.Variant
 
@@ -106,6 +107,7 @@ test-suite furykernel-test
     Test.FuryKernel.Run
     Test.FuryKernel.SelectionTest
     Test.FuryKernel.Targets
+    Test.FuryKernel.TileTest
     Test.FuryKernel.VariantTest
 
   ghc-options:

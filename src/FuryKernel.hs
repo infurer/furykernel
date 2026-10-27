@@ -14,6 +14,7 @@ module FuryKernel (
   module FuryKernel.Constraint,
   module FuryKernel.Reduce,
   module FuryKernel.Target,
+  module FuryKernel.Tile,
   module FuryKernel.Type,
   DimRange (..),
   Name,
@@ -25,4 +26,5 @@ import FuryKernel.Constraint (AlignOk, PackOk, TgArrayOk, ThreadsOk, withPack, w
 import FuryKernel.IR (DimRange (..), Name)
 import FuryKernel.Reduce
 import FuryKernel.Target (Target (..))
+import FuryKernel.Tile
 import FuryKernel.Type (BF16 (..), F16 (..), IsScalar)
