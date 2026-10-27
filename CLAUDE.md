@@ -71,8 +71,10 @@ nix fmt && git diff --exit-code &&
     exact widening and round-to-nearest-even narrowing, and binary64 to
     binary16 in one rounding, not through binary32 (`narrowF16Double`).
   - `FuryKernel.Target`: the `Target` class, whose associated types state a
-    GPU family's limits, reflected into `TargetCaps`. Target libraries
-    define the instances; the core defines one, `FuryKernel.Cpu`'s `Cpu`.
+    GPU family's limits, reflected into `TargetCaps`, and the input types
+    of the fragment products it has (`targetFragments`, none by default).
+    Target libraries define the instances; the core defines one,
+    `FuryKernel.Cpu`'s `Cpu`.
   - `FuryKernel.Constraint`: each resource rule twice, as a type family for
     static mode and as a term decider for the gate and dynamic mode, which
     reflects runtime numbers into the static constraints: threads,
@@ -118,7 +120,12 @@ nix fmt && git diff --exit-code &&
     Buffers carry their target, for the pack rule: `loadPack` and
     `storePack` move a `Pack` of consecutive elements at once, indexed in
     packs, so a pack is aligned whenever its buffer is. `table` declares a
-    table, `loadVia` and `loadPackVia` read through one.
+    table, `loadVia` and `loadPackVia` read through one. Fragments are the
+    8×8 matrices a SIMD group holds together (`fragment`): loaded from
+    device or threadgroup memory, plain or transposed (`fragLoad`,
+    `fragLoadT`, `fragLoadTg`, `fragLoadTgT`), multiplied into f32
+    accumulators (`fragMma`) and stored; every lane takes part
+    (`Converged`).
   - `FuryKernel.Check`: the gate. `check` returns a `Checked` kernel, whose
     constructor is private, or the findings; backends take only `Checked`
     kernels. A kernel keeps the caps of the target it was built for, and
@@ -131,8 +138,9 @@ nix fmt && git diff --exit-code &&
     loop bound (a threadgroup load as uniform as its index where no store
     to its array can run in its barrier epoch, every side of every if and
     pass of every loop counted, as a reduction's result is; any other
-    divergent), the regions of barriers and SIMD-group operations, the
-    resources and the packs.
+    divergent), the regions of barriers, SIMD-group operations and
+    fragments (whose indices and strides must be SIMD-uniform), the
+    resources, the packs, and fragments of types the target multiplies.
     A finding carries its place (`findingLocation`): its kernel, and the
     ifs and loops around what it is about.
   - `FuryKernel.Check.Launch`: launch sizes over the dimensions' legal
@@ -159,6 +167,10 @@ nix fmt && git diff --exit-code &&
     seeded order, so races show; undefined behaviour is an error: accesses
     past what the kernel declares, however much the launch gives,
     dimensions outside their range, integer division by zero or overflow.
+    A fragment product adds each
+    element's eight products to its accumulator in f32, in k order; GPUs
+    may add in another, so kernels with fragments are held to f32
+    accumulation's bound against the interpreter, not to its bits.
   - `FuryKernel.Reduce`: threadgroup reductions (`tgReduceSum` from -0,
     `tgReduceMax` from -inf) from SIMD-group reductions and a scratch array, and
     split-K's combine (`combineSplits`), which adds each output's partials
@@ -212,12 +224,13 @@ nix fmt && git diff --exit-code &&
     limits, and its backend: checked kernels as Rust, in the interpreter's
     model (every local a vector with a lane per thread, each statement run
     for the active lanes in order, branches splitting them), so that
-    runtimes without a GPU run the kernels their GPUs run. Its output needs
-    the `half` crate. Rsqrt, exp, log and tanh are binary64's, rounded
-    once, as the interpreter's: to binary16 by a rounding of its own, since
-    the crate's `from_f64` goes through binary32 on x86 and keeps only the
-    upper bits in its portable code. An fma is `mul_add` in f32 and goes
-    through binary64 in f16.
+    runtimes without a GPU run the kernels their GPUs run; fragments are
+    64 f32 elements a SIMD group, multiplied as the interpreter does. Its
+    output needs the `half` crate. Rsqrt, exp, log and tanh are
+    binary64's, rounded once, as the interpreter's: to binary16 by a
+    rounding of its own, since the crate's `from_f64` goes through binary32
+    on x86 and keeps only the upper bits in its portable code. An fma is
+    `mul_add` in f32 and goes through binary64 in f16.
     It refuses two kernels of one name in a module, and two whose names
     make one Rust type name.
     A kernel asserts its dimensions' ranges and multiples before it
@@ -285,13 +298,16 @@ nix fmt && git diff --exit-code &&
   maximum up to what the IR leaves to a target, compared by class; a
   threadgroup sum of -0s is -0.
   The IR's text, golden, for straight lines, packs, an if, a SIMD-group sum
-  and threadgroup memory, and tables; one kernel's IR and ABI hashes pinned.
+  and threadgroup memory, tables and fragments; one kernel's IR and ABI
+  hashes pinned.
   Kernels run on the interpreter against f64 specifications: an RMSNorm
   within one bf16 ulp on every SIMD width, and bitwise batch-invariant; a
   bf16 GEMV family with packs and split-K (`Test.FuryKernel.Gemv`), bit
   for bit where f32 sums are exact and within the bound of f32
   accumulation elsewhere, a row's bits the same for every m, place in the
-  batch, rows per SIMD group and thread count.
+  batch, rows per SIMD group and thread count; a GEMM of fragments
+  (`Test.FuryKernel.FragmentTest`) for bf16, f16 and f32 inputs, within
+  f32 accumulation's bound, and refused on a target without them.
   The CPU target's Rust, golden; `checks.cpu` holds it to the
   interpreter's bits and refusals (a dimension out of its range or off
   its multiple). Programs: the gate, the evaluator on small cases

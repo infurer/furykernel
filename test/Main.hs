@@ -12,6 +12,7 @@ import Test.FuryKernel.CheckTest qualified as CheckTest
 import Test.FuryKernel.ConstraintTest qualified as ConstraintTest
 import Test.FuryKernel.CpuTest qualified as CpuTest
 import Test.FuryKernel.EmitRustTest qualified as EmitRustTest
+import Test.FuryKernel.FragmentTest qualified as FragmentTest
 import Test.FuryKernel.GemvTest qualified as GemvTest
 import Test.FuryKernel.InterpTest qualified as InterpTest
 import Test.FuryKernel.JsonTest qualified as JsonTest
@@ -37,6 +38,7 @@ main =
       , BuildTest.tests
       , CheckTest.tests
       , InterpTest.tests
+      , FragmentTest.tests
       , ReduceTest.tests
       , GemvTest.tests
       , VariantTest.tests

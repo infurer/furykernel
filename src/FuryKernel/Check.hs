@@ -93,7 +93,7 @@ check k
 
 -- | Every finding for a kernel's IR on a target with these limits.
 checkIR :: TargetCaps -> IR.Kernel -> [Finding]
-checkIR caps k = map (placedIn k) $ checkNames k <> checkTyping k <> checkLaunchSizes k <> checkUniformity k <> checkResources caps k <> checkPacks caps k
+checkIR caps k = map (placedIn k) $ checkNames k <> checkTyping k <> checkLaunchSizes k <> checkUniformity k <> checkResources caps k <> checkPacks caps k <> checkFragments caps k
 
 {- | A finding placed in its kernel, if nothing placed it more closely: a
 finding's place is its kernel and the ifs and loops around what it is about.
@@ -162,6 +162,7 @@ checkNames k =
     SLet n _ _ -> [n]
     SVar n _ _ -> [n]
     SSimd n _ _ _ -> [n]
+    SFragVar n _ -> [n]
     SLoadPack ns _ _ _ -> ns
     SLoadPackVia ns _ _ _ _ -> ns
     SIf _ _ th el -> concatMap bound th <> concatMap bound el
@@ -199,7 +200,7 @@ nameProblem n
 ------------------------------------------------------------------------------
 -- Typing
 
-data Local = Local {localType :: ScalarType, localMutable :: Bool}
+data Local = Local {localType :: ScalarType, localMutable :: Bool, localFragment :: Bool}
 
 data TypingState = TypingState
   { scopes :: [Map Name Local]
@@ -252,7 +253,9 @@ checkTyping k =
       | otherwise -> Nothing <$ bad ("The literal " <> renderExpr (ELit l) <> " is a NaN other than its type's canonical one, the quiet NaN with no payload or sign.")
     EVar n ->
       lookupLocal n >>= \case
-        Just l -> pure (Just l.localType)
+        Just l
+          | l.localFragment -> Nothing <$ bad ("The fragment " <> n <> " is used as a value.")
+          | otherwise -> pure (Just l.localType)
         Nothing -> Nothing <$ bad ("The local " <> n <> " is used outside its scope or before it is bound.")
     EParam n -> case Map.lookup n params of
       Just t -> pure (Just t)
@@ -353,11 +356,12 @@ checkTyping k =
 
   stmt :: Stmt -> State TypingState ()
   stmt = \case
-    SLet n t e -> expect ("The value of " <> n) t e >> declare n (Local t False)
-    SVar n t e -> expect ("The value of " <> n) t e >> declare n (Local t True)
+    SLet n t e -> expect ("The value of " <> n) t e >> declare n (Local t False False)
+    SVar n t e -> expect ("The value of " <> n) t e >> declare n (Local t True False)
     SAssign n e ->
       lookupLocal n >>= \case
         Just l
+          | l.localFragment -> bad ("An assignment to the fragment " <> n <> ".")
           | l.localMutable -> expect ("The value assigned to " <> n) l.localType e
           | otherwise -> bad ("An assignment to " <> n <> ", which is not a var.")
         Nothing -> bad ("An assignment to " <> n <> ", which is not in scope.")
@@ -381,7 +385,7 @@ checkTyping k =
           when (tb.tableType /= t) $
             bad ("A pack of " <> scalarTypeName t <> " loaded through " <> n <> ", a table of " <> scalarTypeName tb.tableType <> ".")
         Nothing -> bad ("No table " <> n <> ".")
-      traverse_ (\l -> declare l (Local t False)) ns
+      traverse_ (\l -> declare l (Local t False False)) ns
     SLoadPack ns t n i -> do
       index ("buffer " <> n) i
       case Map.lookup n buffers of
@@ -390,7 +394,7 @@ checkTyping k =
           when (b.bufType /= t) $
             bad ("A pack of " <> scalarTypeName t <> " loaded from " <> n <> ", a buffer of " <> scalarTypeName b.bufType <> ".")
         Nothing -> bad ("No buffer " <> n <> ".")
-      traverse_ (\l -> declare l (Local t False)) ns
+      traverse_ (\l -> declare l (Local t False False)) ns
     SStorePack n i es -> do
       index ("buffer " <> n) i
       case Map.lookup n buffers of
@@ -407,12 +411,52 @@ checkTyping k =
       expect ("The end of loop " <> v) TU32 end
       expect ("The step of loop " <> v) TU32 step
       when (step == ELit (LU32 0)) $ bad ("The loop " <> v <> " steps by 0, so it never ends.")
-      within (forPlace v) (scoped (declare v (Local TU32 False) >> traverse_ stmt body))
+      within (forPlace v) (scoped (declare v (Local TU32 False False) >> traverse_ stmt body))
     SBarrier -> pure ()
     SSimd n _ t e -> do
       unless (t `elem` [TF32, TF16, TI32, TU32]) $ bad ("No SIMD-group reduction of " <> scalarTypeName t <> ".")
       expect ("The operand of " <> n) t e
-      declare n (Local t False)
+      declare n (Local t False False)
+    SFragVar n t -> do
+      unless (t `elem` [TBF16, TF16, TF32]) $ bad ("No fragment of " <> scalarTypeName t <> ".")
+      declare n (Local t True True)
+    SFragLoad n m i st _ -> do
+      index ("the fragment load into " <> n) i
+      index ("the stride of the fragment load into " <> n) st
+      t <- fragmentType n
+      element ("The fragment " <> n <> " loaded from") m t True
+    SFragStore m i st n -> do
+      index ("the fragment store of " <> n) i
+      index ("the stride of the fragment store of " <> n) st
+      t <- fragmentType n
+      element ("The fragment " <> n <> " stored to") m t False
+    SFragMma d a b c -> do
+      td <- fragmentType d
+      ta <- fragmentType a
+      tb <- fragmentType b
+      tc <- fragmentType c
+      when (ta /= tb) $ bad ("The fragments " <> a <> " and " <> b <> " multiplied differ in type.")
+      when (d `elem` [a, b]) $ bad ("The product into " <> d <> " multiplies " <> d <> " too: only its accumulator may be its result.")
+      unless (td == Just TF32 && tc == Just TF32) $ bad ("The product into " <> d <> " accumulates into fragments other than f32.")
+
+  -- A fragment's element type, or Nothing after reporting it isn't one.
+  fragmentType n =
+    lookupLocal n >>= \case
+      Just l | l.localFragment -> pure (Just l.localType)
+      Just _ -> Nothing <$ bad ("The local " <> n <> " is not a fragment.")
+      Nothing -> Nothing <$ bad ("The fragment " <> n <> " is used outside its scope or before it is declared.")
+
+  -- A fragment's memory: there, of its element type, readable or writable.
+  element what m t reading = case m of
+    FDevice n -> case Map.lookup n buffers of
+      Just b -> do
+        when (reading && b.bufAccess == WriteOnly) $ bad (what <> " the write-only buffer " <> n <> ".")
+        when (not reading && b.bufAccess == ReadOnly) $ bad (what <> " the read-only buffer " <> n <> ".")
+        when (any (/= b.bufType) t) $ bad (what <> " " <> n <> ", a buffer of " <> scalarTypeName b.bufType <> ".")
+      Nothing -> bad ("No buffer " <> n <> ".")
+    FThreadgroup n -> case Map.lookup n arrays of
+      Just a -> when (any (/= a.tgType) t) $ bad (what <> " " <> n <> ", an array of " <> scalarTypeName a.tgType <> ".")
+      Nothing -> bad ("No threadgroup array " <> n <> ".")
 
 -- | The grid and the extents: u32 expressions over parameters and literals.
 interfaceTyping :: IR.Kernel -> [Finding]
@@ -549,9 +593,20 @@ checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
     SSimd n _ _ _ ->
       when (r == D) $
         report place Regions ("The SIMD-group operation " <> n <> " where not every lane of the group is active.")
+    SFragVar n _ -> fragment n []
+    SFragLoad n _ i st _ -> fragment n [i, st]
+    SFragStore _ i st n -> fragment n [i, st]
+    SFragMma d _ _ _ -> fragment d []
     _ -> pure ()
    where
     uni = uniIn stored
+    -- A SIMD group's fragment operation: every lane active, and its
+    -- memory's index and stride the same in every lane.
+    fragment n addresses = do
+      when (r == D) $
+        report place Regions ("The fragment operation on " <> n <> " where not every lane of the group is active.")
+      when (any ((> S) . uni locals) addresses) $
+        report place Uniformity ("The fragment " <> n <> "'s index or stride differs across the lanes of a SIMD group.")
 
   declared place d u what =
     when (u > regionUni d) $
@@ -636,6 +691,7 @@ backward ok ss after = case ss of
 storedBy :: Stmt -> Set Name
 storedBy = \case
   STgStore n _ _ -> Set.singleton n
+  SFragStore (FThreadgroup n) _ _ _ -> Set.singleton n
   _ -> Set.empty
 
 settle :: (Eq a) => (a -> a) -> a -> a
@@ -651,6 +707,37 @@ blocks2 :: [[Epoch]] -> ([Epoch], [Epoch])
 blocks2 = \case
   [a, b] -> (a, b)
   _ -> ([], [])
+
+------------------------------------------------------------------------------
+-- Fragments
+
+{- | Fragments against the target: none on a target without them, and
+every product's inputs of an element type it takes (its accumulators are
+f32, which every target with fragments has).
+-}
+checkFragments :: TargetCaps -> IR.Kernel -> [Finding]
+checkFragments caps k
+  | null caps.capFragments =
+      [ Finding Fragments (caps.capName <> " has no fragments, and the kernel declares " <> T.intercalate ", " declared <> ".")
+      | not (null declared)
+      ]
+  | otherwise = nub [locatedAt (Location k.kernelName (reverse place)) f | (place, s) <- placed, f <- product' s]
+ where
+  placed = concatMap (flatten []) k.kernelBody
+  statements = map snd placed
+  declared = [n | SFragVar n _ <- statements]
+  types = Map.fromList [(n, t) | SFragVar n t <- statements]
+  flatten place = \case
+    SIf _ c th el -> concatMap (flatten (ifPlace c : place)) th <> concatMap (flatten (elsePlace c : place)) el
+    SFor _ v _ _ _ body -> concatMap (flatten (forPlace v : place)) body
+    st -> [(place, st)]
+  product' = \case
+    SFragMma _ a b _ ->
+      [ Finding Fragments (caps.capName <> " takes no fragments of " <> scalarTypeName t <> " into a product.")
+      | t <- nub [t' | n <- [a, b], Just t' <- [Map.lookup n types]]
+      , t `notElem` caps.capFragments
+      ]
+    _ -> []
 
 ------------------------------------------------------------------------------
 -- Resources

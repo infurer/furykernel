@@ -28,6 +28,7 @@ module FuryKernel.IR (
   -- * Statements
   Region (..),
   SimdOp (..),
+  FragMemory (..),
   Stmt (..),
 
   -- * Kernels
@@ -258,6 +259,14 @@ data Region
   | RDivergent
   deriving stock (Eq, Ord, Show, Enum, Bounded)
 
+{- | Where a fragment is loaded from or stored to: a device buffer or a
+threadgroup array, by name.
+-}
+data FragMemory
+  = FDevice Name
+  | FThreadgroup Name
+  deriving stock (Eq, Show)
+
 {- | Reductions across the lanes of a SIMD group, by 'Add', 'Max' and 'Min',
 each lane getting the same value. The lanes combine pairwise, neighbours
 first, then pairs of pairs, each operation rounding in the operands' type:
@@ -306,6 +315,23 @@ data Stmt
     SBarrier
   | -- | A local bound to a SIMD-group reduction of the given type.
     SSimd Name SimdOp ScalarType Expr
+  | {- | A fragment: an 8×8 matrix of the given element type that a SIMD
+    group holds together, every element zero. Fragments are variables:
+    loads and products write them.
+    -}
+    SFragVar Name ScalarType
+  | {- | A fragment loaded from memory: the fragment, the memory, the index
+    of its first element, the elements between one of its rows and the
+    next, and whether it is the memory's 8×8 block transposed: element
+    @(r, c)@ is @index + r * stride + c@, or @index + c * stride + r@.
+    -}
+    SFragLoad Name FragMemory Expr Expr Bool
+  | {- | @d = a · b + c@, of fragments: the result, then @a@, @b@ and @c@;
+    the result may be @c@.
+    -}
+    SFragMma Name Name Name Name
+  | -- | A fragment stored, element @(r, c)@ at @index + r * stride + c@.
+    SFragStore FragMemory Expr Expr Name
   deriving stock (Eq, Show)
 
 data Access
@@ -529,7 +555,16 @@ stmt depth = \case
       <> [pad <> "}"]
   SBarrier -> [pad <> "barrier"]
   SSimd n op t e -> [pad <> "let " <> n <> " : " <> scalarTypeName t <> " = " <> simdOp op <> "(" <> renderExpr e <> ")"]
+  SFragVar n t -> [pad <> "fragment " <> n <> " : " <> scalarTypeName t <> "[8x8] = 0"]
+  SFragLoad n m i st tr ->
+    [pad <> n <> " = " <> memory m <> ".fragment" <> (if tr then "_t" else "") <> "[" <> renderExpr i <> ", stride " <> renderExpr st <> "]"]
+  SFragMma d a b c -> [pad <> d <> " = " <> a <> " * " <> b <> " + " <> c]
+  SFragStore m i st n ->
+    [pad <> memory m <> ".fragment[" <> renderExpr i <> ", stride " <> renderExpr st <> "] = " <> n]
  where
+  memory = \case
+    FDevice b -> b
+    FThreadgroup a -> "threadgroup " <> a
   pad = T.replicate (2 * depth) " "
   region = \case
     RUniform -> "uniform"

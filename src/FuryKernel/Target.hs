@@ -14,8 +14,10 @@ the target.
 What a target makes legal is not what makes it fast: measured profiles
 (bandwidth, cores, power state) live with the tuning, not here.
 
-Later stages add fragments, features, atomics, forward progress and the
-minimum shading-language version.
+Fragments, the 8×8 matrices a SIMD group multiplies together, are a term:
+the element types a target's products take as inputs, each into f32. Later
+stages add features, atomics, forward progress and the minimum
+shading-language version.
 -}
 module FuryKernel.Target (
   Target (..),
@@ -27,6 +29,7 @@ import Data.Kind (Constraint, Type)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
+import FuryKernel.Type (ScalarType)
 import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
 import GHC.TypeNats (KnownNat, Nat, natVal)
 import Numeric.Natural (Natural)
@@ -60,6 +63,12 @@ class
   -- | The widest load or store of one lane, in bytes.
   type LaneLoadMax t :: Nat
 
+  {- | The element types its fragment products take as inputs, each into
+  f32 accumulators; none if it has no fragments.
+  -}
+  targetFragments :: [ScalarType]
+  targetFragments = []
+
 -- | A target's limits as terms.
 data TargetCaps = TargetCaps
   { capName :: Text
@@ -68,6 +77,7 @@ data TargetCaps = TargetCaps
   , capTgMemBytes :: Natural
   , capMaxBuffers :: Natural
   , capLaneLoadMax :: Natural
+  , capFragments :: [ScalarType]
   }
   deriving stock (Eq, Show)
 
@@ -80,6 +90,7 @@ targetCaps =
     , capTgMemBytes = nat @(TgMemBytes t)
     , capMaxBuffers = nat @(MaxBuffers t)
     , capLaneLoadMax = nat @(LaneLoadMax t)
+    , capFragments = targetFragments @t
     }
  where
   nat :: forall n. (KnownNat n) => Natural

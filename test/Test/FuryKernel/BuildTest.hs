@@ -97,6 +97,24 @@ tests =
             , "  }"
             , "}"
             ]
+    , testCase "fragments render as their IR" $
+        renderKernel (kernelIR product8)
+          @?= T.unlines
+            [ "ir 1"
+            , "kernel product8 threads 32 simd 32 groups 1u"
+            , "  buffer a : read f32[64u] align 16"
+            , "  buffer b : read f32[64u] align 16"
+            , "  buffer c : write f32[64u] align 16"
+            , "{"
+            , "  fragment acc : f32[8x8] = 0"
+            , "  fragment fa : f32[8x8] = 0"
+            , "  fragment fb : f32[8x8] = 0"
+            , "  fa = a.fragment[0u, stride 8u]"
+            , "  fb = b.fragment[0u, stride 8u]"
+            , "  acc = fa * fb + acc"
+            , "  c.fragment[0u, stride 8u] = acc"
+            , "}"
+            ]
     , testCase "a pack stored with the wrong number of values" $
         kernelProblems short @?= [Finding Typing "A pack of 4 stored to y with 3 values."]
     , testCase "an integer narrowing renders with what it does out of range" $
@@ -178,6 +196,23 @@ viaTable = kernel "via_table" $ do
   threads @32
   groups 1
   pure . pure $ whenLane (threadIndex .< 8) $ store y threadIndex (loadVia arrays e threadIndex)
+
+-- | One product of 8×8 fragments, stored.
+product8 :: Kernel T32
+product8 = kernel "product8" $ do
+  a <- buffer @ReadOnly @16 @Float "a" 64
+  b <- buffer @ReadOnly @16 @Float "b" 64
+  c <- buffer @WriteOnly @16 @Float "c" 64
+  threads @32
+  groups 1
+  pure . pure $ do
+    acc <- fragment @Float "acc"
+    fa <- fragment @Float "fa"
+    fb <- fragment @Float "fb"
+    fragLoad fa a 0 8
+    fragLoad fb b 0 8
+    fragMma acc fa fb acc
+    fragStore c 0 8 acc
 
 {- | A NaN whatever the host makes of 0 / 0, and 1 + 2^-11 + 2^-30, which
 rounding through binary32 would make 1.

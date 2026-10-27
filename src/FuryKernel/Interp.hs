@@ -346,7 +346,87 @@ stmt env grp active s = unless (null active) $ case s of
         vs <- forM lanes (\l -> eval env grp l e)
         r <- reduce op vs
         forM_ lanes $ \l -> lift (writeArray arr l $! r)
+  SFragVar n t -> simdGroups n $ \g _ -> do
+    arr <- fragment n
+    forM_ [0 .. 63] $ \e -> lift (writeArray arr (g * 64 + e) $! zero t)
+  SFragLoad n m i st tr -> simdGroups n $ \g lane -> do
+    base <- eval env grp lane i >>= index
+    stride <- eval env grp lane st >>= index
+    arr <- fragment n
+    forM_ [(r, c) | r <- [0 .. 7], c <- [0 .. 7]] $ \(r, c) -> do
+      let ix = base + (if tr then c * stride + r else r * stride + c)
+      v <- fragMemoryRead m ix
+      lift (writeArray arr (g * 64 + fromIntegral (r * 8 + c)) $! v)
+  SFragStore m i st n -> simdGroups n $ \g lane -> do
+    base <- eval env grp lane i >>= index
+    stride <- eval env grp lane st >>= index
+    arr <- fragment n
+    forM_ [(r, c) | r <- [0 .. 7], c <- [0 .. 7]] $ \(r, c) -> do
+      v <- lift (readArray arr (g * 64 + fromIntegral (r * 8 + c)))
+      fragMemoryWrite m (base + r * stride + c) v
+  SFragMma d a b c -> simdGroups d $ \g _ -> do
+    fa <- fragment a
+    fb <- fragment b
+    fc <- fragment c
+    let at arr r k = lift (readArray arr (g * 64 + r * 8 + k)) >>= asFloat
+    results <- forM [(r, col) | r <- [0 .. 7], col <- [0 .. 7]] $ \(r, col) -> do
+      start <- at fc r col
+      products <- forM [0 .. 7] $ \k -> (*) <$> at fa r k <*> at fb k col
+      pure (r * 8 + col, foldl (+) start products)
+    fd <- fragment d
+    forM_ results $ \(e, v) -> lift (writeArray fd (g * 64 + e) $! VF32 v)
  where
+  -- A fragment operation, once per SIMD group with any lane active: every
+  -- lane of it must be, and the group's first lane gives the addresses.
+  simdGroups :: Name -> (Int -> Int -> M s ()) -> M s ()
+  simdGroups n body = do
+    let w = fromIntegral env.envCaps.capSimdWidth
+        threads = fromIntegral env.envKernel.kernelThreads
+        activeSet = IntSet.fromList active
+    forM_ [0 .. (threads + w - 1) `div` w - 1] $ \g -> do
+      let lanes = [g * w .. min threads ((g + 1) * w) - 1]
+          present = filter (`IntSet.member` activeSet) lanes
+      unless (null present) $ do
+        unless (present == lanes) $ throwE (DivergentSimd n)
+        body g (g * w)
+  -- A fragment's elements, 64 a SIMD group, made on first use.
+  fragment n = do
+    m <- lift (readSTRef grp.groupLocals)
+    case Map.lookup n m of
+      Just arr -> pure arr
+      Nothing -> do
+        let w = fromIntegral env.envCaps.capSimdWidth
+            groups = (fromIntegral env.envKernel.kernelThreads + w - 1) `div` w
+        arr <- lift (newArray (0, groups * 64 - 1) (VF32 0))
+        lift (modifySTRef' grp.groupLocals (Map.insert n arr))
+        pure arr
+  zero = \case
+    TBF16 -> VBF16 (narrowBF16 0)
+    TF16 -> VF16 (narrowF16 0)
+    _ -> VF32 0
+  asFloat = \case
+    VF32 x -> pure x
+    VBF16 b -> pure (widenBF16 b)
+    VF16 h -> pure (widenF16 h)
+    v -> throwE (Internal ("a fragment element " <> T.pack (show v)))
+  fragMemoryRead m ix = case m of
+    FDevice b -> do
+      arr <- maybe (throwE (MissingBuffer b)) pure (Map.lookup b env.envBuffers)
+      checkBounds b arr ix
+      lift (readArray arr (fromIntegral ix))
+    FThreadgroup a -> do
+      arr <- maybe (throwE (Internal ("threadgroup array " <> a))) pure (Map.lookup a grp.groupTg)
+      checkBounds a arr ix
+      lift (readArray arr (fromIntegral ix)) >>= maybe (throwE (UninitializedRead a (fromIntegral ix))) pure
+  fragMemoryWrite m ix v = case m of
+    FDevice b -> do
+      arr <- maybe (throwE (MissingBuffer b)) pure (Map.lookup b env.envBuffers)
+      checkBounds b arr ix
+      lift (writeArray arr (fromIntegral ix) $! v)
+    FThreadgroup a -> do
+      arr <- maybe (throwE (Internal ("threadgroup array " <> a))) pure (Map.lookup a grp.groupTg)
+      checkBounds a arr ix
+      lift (writeArray arr (fromIntegral ix) $! Just $! v)
   bindLocal n e = do
     vs <- forM active $ \l -> (l,) <$> eval env grp l e
     arr <- fresh n

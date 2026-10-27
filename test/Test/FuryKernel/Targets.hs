@@ -2,7 +2,8 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 
 {- | Targets for the tests: SIMD widths from 8 to 64, so that portable code
-is exercised on widths other than the ones in use today.
+is exercised on widths other than the ones in use today. T32 multiplies
+fragments of every type, T64 of f16 only, the others none.
 -}
 module Test.FuryKernel.Targets (
   T8,
@@ -12,6 +13,7 @@ module Test.FuryKernel.Targets (
 ) where
 
 import FuryKernel.Target (Target (..))
+import FuryKernel.Type (ScalarType (..))
 
 data T8
 
@@ -44,6 +46,7 @@ instance Target T32 where
   type TgMemBytes T32 = 32768
   type MaxBuffers T32 = 31
   type LaneLoadMax T32 = 16
+  targetFragments = [TBF16, TF16, TF32]
 
 instance Target T64 where
   type TargetName T64 = "T64"
@@ -52,3 +55,4 @@ instance Target T64 where
   type TgMemBytes T64 = 65536
   type MaxBuffers T64 = 31
   type LaneLoadMax T64 = 16
+  targetFragments = [TF16]

@@ -64,6 +64,8 @@ data Rule
     ids, tokens, slots, blocks and positions.
     -}
     Bounds
+  | -- | Fragment products only of the element types the target takes.
+    Fragments
   | -- | The kernel checked for the target it was built for.
     Target
   | {- | Overrides: the ABI of the kernel they replace, together every legal

@@ -74,6 +74,7 @@ instance Target Cpu where
   type TgMemBytes Cpu = 32768
   type MaxBuffers Cpu = 31
   type LaneLoadMax Cpu = 16
+  targetFragments = [TBF16, TF16, TF32]
 
 -- | The language the source is in.
 rustLanguage :: Text
@@ -253,6 +254,7 @@ kernelSource c =
        ]
     <> ["    let mut " <> rustIdent n <> ": Vec<" <> rustType t <> "> = vec![" <> zero t <> "; FK_THREADS];" | (n, t) <- locals]
     <> ["    let mut " <> rustIdent a.tgName <> ": Vec<" <> rustType a.tgType <> "> = vec![" <> zero a.tgType <> "; " <> showT a.tgCount <> "];" | a <- k.kernelTgArrays]
+    <> ["    let mut " <> rustIdent n <> ": Vec<[f32; 64]> = vec![[0.0f32; 64]; FK_THREADS.div_ceil(FK_WIDTH)];" | n <- fragments]
     <> [ "    let fk_all: Vec<usize> = (0..FK_THREADS).collect();"
        , "    for fk_group in 0..fk_groups {"
        , "        let fk_group = fk_group as u32;"
@@ -291,6 +293,13 @@ kernelSource c =
     TBool -> "u8::from_ne_bytes(" <> bytes <> ") != 0"
   -- Every local, once: names are unique in a checked kernel.
   locals = nub (concatMap bound k.kernelBody)
+  -- Every fragment: 64 elements a SIMD group, held as f32.
+  fragments = nub (concatMap fragmentsOf k.kernelBody)
+  fragmentsOf = \case
+    SFragVar n _ -> [n]
+    SIf _ _ th el -> concatMap fragmentsOf th <> concatMap fragmentsOf el
+    SFor _ _ _ _ _ body -> concatMap fragmentsOf body
+    _ -> []
   bound = \case
     SLet n t _ -> [(n, t)]
     SVar n t _ -> [(n, t)]
@@ -478,6 +487,48 @@ stmt depth = \case
       , pad1 <> "}"
       , pad <> "}"
       ]
+  SFragVar n _ -> pure (simdGroups [rustIdent n <> "[fk_simd] = [0.0f32; 64];"])
+  SFragLoad n m i st tr -> do
+    i' <- ex i
+    st' <- ex st
+    (memory, t) <- fragMemory m
+    let at = if tr then "fk_c * fk_stride + fk_r" else "fk_r * fk_stride + fk_c"
+    pure . simdGroups $
+      [ "let fk_base = " <> index i' <> ";"
+      , "let fk_stride = " <> index st' <> ";"
+      , "for fk_r in 0..8 {"
+      , "    for fk_c in 0..8 {"
+      , "        " <> rustIdent n <> "[fk_simd][fk_r * 8 + fk_c] = " <> widenTo t (memory <> "[fk_base + " <> at <> "]") <> ";"
+      , "    }"
+      , "}"
+      ]
+  SFragStore m i st n -> do
+    i' <- ex i
+    st' <- ex st
+    (memory, t) <- fragMemory m
+    pure . simdGroups $
+      [ "let fk_base = " <> index i' <> ";"
+      , "let fk_stride = " <> index st' <> ";"
+      , "for fk_r in 0..8 {"
+      , "    for fk_c in 0..8 {"
+      , "        " <> memory <> "[fk_base + fk_r * fk_stride + fk_c] = " <> narrowTo t (rustIdent n <> "[fk_simd][fk_r * 8 + fk_c]") <> ";"
+      , "    }"
+      , "}"
+      ]
+  SFragMma d a b c ->
+    pure . simdGroups $
+      [ "let mut fk_out = [0.0f32; 64];"
+      , "for fk_r in 0..8 {"
+      , "    for fk_c in 0..8 {"
+      , "        let mut fk_acc = " <> rustIdent c <> "[fk_simd][fk_r * 8 + fk_c];"
+      , "        for fk_k in 0..8 {"
+      , "            fk_acc = fk_acc + " <> rustIdent a <> "[fk_simd][fk_r * 8 + fk_k] * " <> rustIdent b <> "[fk_simd][fk_k * 8 + fk_c];"
+      , "        }"
+      , "        fk_out[fk_r * 8 + fk_c] = fk_acc;"
+      , "    }"
+      , "}"
+      , rustIdent d <> "[fk_simd] = fk_out;"
+      ]
  where
   pad = T.replicate (4 * depth) " "
   pad1 = T.replicate (4 * (depth + 1)) " "
@@ -490,6 +541,35 @@ stmt depth = \case
     pure (loop [line e'])
   loop body = [pad <> "for &fk_l in fk_act {"] <> map (pad1 <>) body <> [pad <> "}"]
   index i = "(" <> i <> ") as usize"
+  -- Once per SIMD group with active lanes, at its first: fk_simd and fk_l.
+  simdGroups body =
+    [ pad <> "{"
+    , pad1 <> "let mut fk_i = 0;"
+    , pad1 <> "while fk_i < fk_act.len() {"
+    , pad2 <> "let fk_simd = fk_act[fk_i] / FK_WIDTH;"
+    , pad2 <> "let fk_l = fk_act[fk_i];"
+    , pad2 <> "let mut fk_j = fk_i + 1;"
+    , pad2 <> "while fk_j < fk_act.len() && fk_act[fk_j] / FK_WIDTH == fk_simd {"
+    , pad3 <> "fk_j += 1;"
+    , pad2 <> "}"
+    ]
+      <> map (pad2 <>) body
+      <> [ pad2 <> "fk_i = fk_j;"
+         , pad1 <> "}"
+         , pad <> "}"
+         ]
+  -- A fragment's memory, and its element type.
+  fragMemory = \case
+    FDevice b -> gets (\e -> (rustIdent b, Map.findWithDefault TF32 b e.envBuffers))
+    FThreadgroup a -> gets (\e -> (rustIdent a, Map.findWithDefault TF32 a e.envArrays))
+  widenTo t v = case t of
+    TBF16 -> "fk_widen_bf16(" <> v <> ")"
+    TF16 -> "fk_widen_f16(" <> v <> ")"
+    _ -> v
+  narrowTo t v = case t of
+    TBF16 -> "::half::bf16::from_f32(" <> v <> ")"
+    TF16 -> "::half::f16::from_f32(" <> v <> ")"
+    _ -> v
 
 -- | A local of the current lane.
 lane :: Name -> Text

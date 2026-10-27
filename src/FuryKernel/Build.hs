@@ -122,6 +122,18 @@ module FuryKernel.Build (
   barrier,
   simdSum,
   simdMax,
+
+  -- * Fragments
+  Frag,
+  FragInput,
+  fragment,
+  fragLoad,
+  fragLoadT,
+  fragLoadTg,
+  fragLoadTgT,
+  fragMma,
+  fragStore,
+  fragStoreTg,
   whenU,
   whenSimd,
   whenLane,
@@ -933,6 +945,95 @@ simdOp op n (Exp e) = K $ do
   n' <- fresh n
   emit (IR.SSimd n' op (scalarType @a) e)
   pure (Exp (IR.EVar n'))
+
+------------------------------------------------------------------------------
+-- Fragments
+
+{- | An 8×8 matrix of @a@ that a SIMD group holds together: its operations
+need every lane of the group ('Converged'), and a target takes as
+products' inputs only the element types its caps list.
+-}
+type role Frag nominal
+
+newtype Frag a = Frag Name
+
+-- | The element types a fragment product may take as inputs, into f32.
+class (IsScalar a) => FragInput a
+
+instance FragInput BF16
+
+instance FragInput F16
+
+instance FragInput Float
+
+instance
+  ( Unsatisfiable
+      ('Text "Fragments multiply bf16, f16 and f32: no i32.")
+  ) =>
+  FragInput Int32
+
+instance
+  ( Unsatisfiable
+      ('Text "Fragments multiply bf16, f16 and f32: no u32.")
+  ) =>
+  FragInput Word32
+
+instance
+  ( Unsatisfiable
+      ('Text "Fragments multiply bf16, f16 and f32: no i8.")
+  ) =>
+  FragInput Int8
+
+instance
+  ( Unsatisfiable
+      ('Text "Fragments multiply bf16, f16 and f32: no u8.")
+  ) =>
+  FragInput Word8
+
+instance
+  ( Unsatisfiable
+      ('Text "Fragments multiply bf16, f16 and f32: no bool.")
+  ) =>
+  FragInput Bool
+
+-- | A fragment of zeros: an accumulator, or one to load into.
+fragment :: forall a r. (Converged r, IsScalar a) => Name -> K r (Frag a)
+fragment n = K $ do
+  n' <- fresh n
+  emit (IR.SFragVar n' (scalarType @a))
+  pure (Frag n')
+
+{- | Loads a fragment from a buffer: its element @(r, c)@ from
+@index + r * stride + c@.
+-}
+fragLoad :: (Converged r, Readable acc) => Frag a -> Buf t acc align a -> Exp Word32 -> Exp Word32 -> K r ()
+fragLoad (Frag n) (Buf b) (Exp i) (Exp st) = K (emit (IR.SFragLoad n (IR.FDevice b) i st False))
+
+{- | Loads a fragment from a buffer, transposed: its element @(r, c)@ from
+@index + c * stride + r@.
+-}
+fragLoadT :: (Converged r, Readable acc) => Frag a -> Buf t acc align a -> Exp Word32 -> Exp Word32 -> K r ()
+fragLoadT (Frag n) (Buf b) (Exp i) (Exp st) = K (emit (IR.SFragLoad n (IR.FDevice b) i st True))
+
+-- | 'fragLoad' from a threadgroup array.
+fragLoadTg :: (Converged r) => Frag a -> TgArr k a -> Exp Word32 -> Exp Word32 -> K r ()
+fragLoadTg (Frag n) (TgArr a) (Exp i) (Exp st) = K (emit (IR.SFragLoad n (IR.FThreadgroup a) i st False))
+
+-- | 'fragLoadT' from a threadgroup array.
+fragLoadTgT :: (Converged r) => Frag a -> TgArr k a -> Exp Word32 -> Exp Word32 -> K r ()
+fragLoadTgT (Frag n) (TgArr a) (Exp i) (Exp st) = K (emit (IR.SFragLoad n (IR.FThreadgroup a) i st True))
+
+-- | @d = a · b + c@: @d@ may be @c@, accumulating.
+fragMma :: (Converged r, FragInput a) => Frag Float -> Frag a -> Frag a -> Frag Float -> K r ()
+fragMma (Frag d) (Frag a) (Frag b) (Frag c) = K (emit (IR.SFragMma d a b c))
+
+-- | Stores a fragment to a buffer: its element @(r, c)@ at @index + r * stride + c@.
+fragStore :: (Converged r, Writable acc) => Buf t acc align a -> Exp Word32 -> Exp Word32 -> Frag a -> K r ()
+fragStore (Buf b) (Exp i) (Exp st) (Frag n) = K (emit (IR.SFragStore (IR.FDevice b) i st n))
+
+-- | 'fragStore' to a threadgroup array.
+fragStoreTg :: (Converged r) => TgArr k a -> Exp Word32 -> Exp Word32 -> Frag a -> K r ()
+fragStoreTg (TgArr a) (Exp i) (Exp st) (Frag n) = K (emit (IR.SFragStore (IR.FThreadgroup a) i st n))
 
 -- | A branch on a condition uniform across the threadgroup.
 whenU :: Exp Bool -> K r () -> K r ()

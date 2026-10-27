@@ -108,6 +108,9 @@ tests =
         -- and one after the barrier, which the next pass's load meets.
         epochOf [SFor RUniform "i" (lu 0) (lu 4) (lu 1) [SBarrier, load, branch, byOne 0]] @?= divergent
         epochOf [SFor RUniform "i" (lu 0) (lu 4) (lu 1) [load, branch, SBarrier, byOne 0]] @?= divergent
+    , testCase "uniformity: a fragment stored to a threadgroup array in a load's epoch makes the load divergent" $
+        epochOf [SFragVar "f" TF32, SBarrier, SLet "v" TF32 (ETgLoad "t" (lu 0)), SFragStore (FThreadgroup "t") (lu 0) (lu 8) "f", SIf RUniform (f32 0 .<. EVar "v") [] []]
+          @?= ["The condition (f32:0x0 < v) is declared uniform across the threadgroup but is divergent across lanes."]
     , testCase "uniformity: a SIMD-group operation's result is uniform only across the group" $
         findings [SSimd "s" SimdSum TU32 (u32 SimdGroup), SFor RUniform "i" (lu 0) (EVar "s") (lu 1) [SBarrier]]
           @?= [ Finding Uniformity "The bounds of loop i is declared uniform across the threadgroup but is uniform across each SIMD group."
@@ -208,6 +211,21 @@ tests =
             withSource acc = (base [SLoadPack ["a", "b"] TF32 "src" (lu 0), uniformIf]) {kernelBuffers = [Buffer "src" acc TF32 16 (ELit (LU32 64))]}
         checkIR (targetCaps @T32) (withSource ReadOnly) @?= []
         map (.findingRule) (checkIR (targetCaps @T32) (withSource ReadWrite)) @?= [Uniformity]
+    , testCase "fragments: an index the same in every lane of the SIMD group" $
+        findings [SFragVar "f" TF32, SFragLoad "f" (FDevice "out") (u32 SimdLane) (lu 8) False]
+          @?= [Finding Uniformity "The fragment f's index or stride differs across the lanes of a SIMD group."]
+    , testCase "a product's result is its accumulator or another fragment, never one it multiplies" $
+        findings [SFragVar "a" TF32, SFragVar "b" TF32, SFragMma "a" "a" "b" "a"]
+          @?= [Finding Typing "The product into a multiplies a too: only its accumulator may be its result."]
+    , testCase "fragments: a product of either input's type the target doesn't take" $
+        [ f.findingMessage
+        | f <- checkIR ((targetCaps @T32) {capFragments = [TF16]}) (base [SFragVar "a" TF16, SFragVar "b" TBF16, SFragVar "c" TF32, SFragMma "c" "a" "b" "c"])
+        , f.findingRule == Fragments
+        ]
+          @?= ["T32 takes no fragments of bf16 into a product."]
+    , testCase "fragments: only where every lane of the SIMD group is active" $
+        findings [SIf RDivergent (u32 SimdLane .==. lu 0) [SFragVar "f" TF32] []]
+          @?= [Finding Regions "The fragment operation on f where not every lane of the group is active."]
     , testCase "names" $
         map
           (.findingMessage)

@@ -86,7 +86,11 @@ cases =
   , narrowingsCase
   ]
     <> zipWith gemvCase [0 :: Int ..] gemvs
-    <> [ arithF32Case
+    <> [ gemmCase "gemm_bf16" (checked "gemm_bf16" (gemm @BF16)) (bf16s 30) (bf16s 31)
+       , gemmCase "gemm_f16" (checked "gemm_f16" (gemm @F16)) (f16s 30) (f16s 31)
+       , gemmCase "gemm_f32" (checked "gemm_f32" (gemm @Float)) (f32s 30) (f32s 31)
+       , gemmCase "staged" (checked "staged" staged) (bf16s 32) (bf16s 33)
+       , arithF32Case
        , arithF16Case
        , fmaF32Case
        , fmaF16Case
@@ -112,6 +116,7 @@ cases =
         ins = fromIntegral sh.inputs
         m = fromIntegral sh.batch
      in Case name (checked name k) [Inputs [] [("x", bf16s 20 (m * ins)), ("w", bf16s 21 (outs * ins)), ("y", bf16Zeros (m * outs))] []] []
+  gemmCase name k a b = Case name k [Inputs [("k", u 64)] [("a", a (16 * 64)), ("b", b (16 * 64)), ("c", zeros 256)] []] []
 
 ------------------------------------------------------------------------------
 -- Kernels
@@ -130,6 +135,53 @@ sumRows = kernel "sum_rows" $ do
     strided "i" 64 $ \i -> acc .= get acc + load x (groupIndex * 64 + i) * loadVia rows groupIndex i
     total <- simdSum "total" (get acc)
     whenLane (threadIndex .== 0) $ store y groupIndex total
+
+-- | C = A · Bᵀ in 8×8 fragments, A and B 16 rows of k, B's tiles loaded transposed.
+gemm :: forall a. (IsScalar a, AlignOk a 16, FragInput a) => Kernel Cpu
+gemm = kernel "gemm" $ do
+  k <- dim "k" (DimRange 8 256 8)
+  a <- buffer @ReadOnly @16 @a "a" (16 * k)
+  b <- buffer @ReadOnly @16 @a "b" (16 * k)
+  c <- buffer @WriteOnly @16 @Float "c" 256
+  threads @128
+  groups 1
+  pure . pure $ do
+    row0 <- let_ "row0" ((simdGroupIndex `quotE` 2) * 8)
+    col0 <- let_ "col0" ((simdGroupIndex `remE` 2) * 8)
+    acc <- fragment @Float "acc"
+    fa <- fragment @a "fa"
+    fb <- fragment @a "fb"
+    forU "p" 0 (k `quotE` 8) $ \p -> do
+      fragLoad fa a (row0 * k + p * 8) k
+      fragLoadT fb b (col0 * k + p * 8) k
+      fragMma acc fa fb acc
+    fragStore c (row0 * 16 + col0) 16 acc
+
+-- | 'gemm' in bf16 with B's tiles staged in threadgroup memory and loaded from there transposed.
+staged :: Kernel Cpu
+staged = kernel "staged" $ do
+  k <- dim "k" (DimRange 8 256 8)
+  a <- buffer @ReadOnly @16 @BF16 "a" (16 * k)
+  b <- buffer @ReadOnly @16 @BF16 "b" (16 * k)
+  c <- buffer @WriteOnly @16 @Float "c" 256
+  threads @128
+  groups 1
+  pure $ do
+    tile <- tgArray @128 @BF16 "tile"
+    pure $ do
+      row0 <- let_ "row0" ((simdGroupIndex `quotE` 2) * 8)
+      col0 <- let_ "col0" ((simdGroupIndex `remE` 2) * 8)
+      acc <- fragment @Float "acc"
+      fa <- fragment @BF16 "fa"
+      fb <- fragment @BF16 "fb"
+      forU "p" 0 (k `quotE` 8) $ \p -> do
+        tgStore tile threadIndex (load b ((threadIndex `quotE` 8) * k + p * 8 + threadIndex `remE` 8))
+        barrier
+        fragLoad fa a (row0 * k + p * 8) k
+        fragLoadTgT fb tile (col0 * 8) 8
+        fragMma acc fa fb acc
+        barrier
+      fragStore c (row0 * 16 + col0) 16 acc
 
 -- | Every f32 operation on pairs of elements.
 arithF32 :: Kernel Cpu
@@ -744,9 +796,10 @@ randoms seed n = [mix (seed * 0x9E3779B97F4A7C15 + fromIntegral i) | i <- [1 .. 
 floats :: Word64 -> Int -> [Float]
 floats seed n = [fromIntegral (fromIntegral (w `shiftR` 40) - 2 ^ (23 :: Int) :: Int) / 2 ^ (22 :: Int) | w <- randoms seed n]
 
-f32s, bf16s :: Word64 -> Int -> [Value]
+f32s, bf16s, f16s :: Word64 -> Int -> [Value]
 f32s seed = map VF32 . floats seed
 bf16s seed = map (VBF16 . narrowBF16) . floats seed
+f16s seed = map (VF16 . narrowF16) . floats seed
 
 zeros, bf16Zeros :: Int -> [Value]
 zeros n = replicate n (VF32 0)
