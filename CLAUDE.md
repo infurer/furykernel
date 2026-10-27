@@ -184,11 +184,14 @@ nix fmt && git diff --exit-code &&
   - `FuryKernel.Tile`: tiles of matrix products. `gemmTile` computes a
     threadgroup's tile of C = A · Bᵀ from element functions the caller
     gives (f32): each step of k staged in threadgroup memory by every
-    thread, multiplied as 8×8 f32 fragments by the SIMD groups, the tile
-    stored in threadgroup memory and handed back element by element, so a
-    fragment's layout in the lanes stays the target's. An element's sum
-    depends on the tile's shape and step only, so a row's result doesn't
-    depend on the batch.
+    thread, a run of 4 consecutive elements of A's or 8 of B's a thread,
+    stored as packs (the target reads a run's sources at once), multiplied
+    as 8×8 f32 fragments by the SIMD groups, then handed back element by
+    element through each SIMD group's share of a small array, a few
+    fragments a round, so a fragment's layout in the lanes stays the
+    target's. An element's sum goes over k in order, eight at a time, the
+    same whatever the tile's shape and step, so a row's result depends on
+    neither the batch nor the tile.
     Its k is known to be a multiple of its step (a literal one, or a
     dimension declared a multiple of it); a tile that breaks a
     precondition is a finding, and nothing of it is built.
@@ -345,7 +348,8 @@ nix fmt && git diff --exit-code &&
   (`Test.FuryKernel.FragmentTest`) for bf16, f16 and f32 inputs, within
   f32 accumulation's bound, and refused on a target without them; a
   GEMM of tiles (`Test.FuryKernel.TileTest`), partial tiles included,
-  against f64, a row's bits the same whatever the rows with it.
+  against f64, a row's bits the same whatever the rows with it and
+  whatever the tile's shape and step.
   The CPU target's Rust, golden; `checks.cpu` holds it to the
   interpreter's bits and refusals (a dimension out of its range or off
   its multiple). Programs: the gate, the evaluator on small cases

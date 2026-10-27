@@ -92,7 +92,7 @@ cases =
        , gemmCase "gemm_f32" (checked "gemm_f32" (gemm @Float)) (f32s 30) (f32s 31)
        , gemmCase "staged" (checked "staged" staged) (bf16s 32) (bf16s 33)
        , tileCase "tiled" (checked "tiled" (tiled @1024 @1024 @4096 (GemmTile 64 64 16 4))) (70, 72, 48)
-       , tileCase "tiled_narrow" (checked "tiled_narrow" (tiled @1024 @2048 @2048 (GemmTile 32 64 32 1))) (70, 72, 64)
+       , tileCase "tiled_narrow" (checked "tiled_narrow" (tiled @1024 @2048 @512 (GemmTile 32 64 32 1))) (70, 72, 64)
        , arithF32Case
        , arithF16Case
        , fmaF32Case
@@ -215,8 +215,8 @@ tiled t = kernel "tiled" $ do
         bSlice
         cTile
         k
-        (\r p -> pure (widen @Float (load a (minE (row0 + r) (m - 1) * k + p))))
-        (\col p -> pure (widen @Float (load b (minE (col0 + col) (n - 1) * k + p))))
+        (\r p -> pure [widen @Float (load a (minE (row0 + r) (m - 1) * k + p + fromIntegral x)) | x <- [0 .. 3 :: Int]])
+        (\col p -> pure [widen @Float (load b (minE (col0 + col) (n - 1) * k + p + fromIntegral x)) | x <- [0 .. 7 :: Int]])
         (\r col v -> whenLane (row0 + r .< m .&& col0 + col .< n) (store c ((row0 + r) * n + col0 + col) v))
 
 -- | Every f32 operation on pairs of elements.
