@@ -119,6 +119,7 @@ module FuryKernel.Build (
   storePack,
   tgLoad,
   tgStore,
+  tgStorePack,
   barrier,
   simdSum,
   simdMax,
@@ -868,6 +869,14 @@ tgLoad (TgArr n) (Exp i) = Exp (IR.ETgLoad n i)
 
 tgStore :: TgArr n a -> Exp Word32 -> Exp a -> K r ()
 tgStore (TgArr n) (Exp i) (Exp e) = K (emit (IR.STgStore n i e))
+
+{- | @tgStorePack a j [v0, v1, v2, v3]@: elements @4 j@ to @4 j + 3@ of the
+threadgroup array @a@, written at once: a pack of two or more elements,
+its bytes a power of two up to the target's widest lane load, which the
+target takes as one store.
+-}
+tgStorePack :: TgArr n a -> Exp Word32 -> [Exp a] -> K r ()
+tgStorePack (TgArr n) (Exp j) es = K (emit (IR.STgStorePack n j (map expIR es)))
 
 -- | Every thread of the threadgroup waits here, so only in 'Uniform' code.
 barrier :: (AllThreads r) => K r ()

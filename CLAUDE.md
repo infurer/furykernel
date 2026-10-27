@@ -119,7 +119,10 @@ nix fmt && git diff --exit-code &&
     Locals are named by the author (`let_`, `var`) and stay named.
     Buffers carry their target, for the pack rule: `loadPack` and
     `storePack` move a `Pack` of consecutive elements at once, indexed in
-    packs, so a pack is aligned whenever its buffer is. `table` declares a
+    packs, so a pack is aligned whenever its buffer is; `tgStorePack`
+    writes two or more elements, as wide as a lane loads, to a threadgroup
+    array, aligned for it as
+    every threadgroup array is. `table` declares a
     table, `loadVia` and `loadPackVia` read through one. Fragments are the
     8×8 matrices a SIMD group holds together (`fragment`): loaded from
     device or threadgroup memory, plain or transposed (`fragLoad`,

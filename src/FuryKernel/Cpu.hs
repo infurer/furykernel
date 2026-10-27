@@ -397,6 +397,13 @@ stmt depth = \case
       ["let fk_at = " <> index i' <> " * " <> showT (length es) <> ";"]
         <> ["let fk_value_" <> showT j <> " = " <> e' <> ";" | (j, e') <- zip [0 :: Int ..] es']
         <> [rustIdent b <> "[fk_at + " <> showT j <> "] = fk_value_" <> showT j <> ";" | j <- [0 .. length es - 1]]
+  STgStorePack a i es -> do
+    i' <- ex i
+    es' <- traverse ex es
+    pure . loop $
+      ["let fk_at = " <> index i' <> " * " <> showT (length es) <> ";"]
+        <> ["let fk_value_" <> showT j <> " = " <> e' <> ";" | (j, e') <- zip [0 :: Int ..] es']
+        <> [rustIdent a <> "[fk_at + " <> showT j <> "] = fk_value_" <> showT j <> ";" | j <- [0 .. length es - 1]]
   SIf _ c th el -> do
     c' <- ex c
     th' <- concat <$> traverse (stmt (depth + 2)) th

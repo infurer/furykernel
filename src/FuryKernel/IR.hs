@@ -298,6 +298,8 @@ data Stmt
     SLoadPack [Name] ScalarType Name Expr
   | -- | Buffer, index in packs, the values: a pack written at once.
     SStorePack Name Expr [Expr]
+  | -- | Threadgroup array, index in packs, the values: a pack written at once.
+    STgStorePack Name Expr [Expr]
   | {- | Locals bound to a pack read through a table: the locals, their
     type, the table, the entry and the index in packs.
     -}
@@ -516,6 +518,8 @@ stmt depth = \case
     ]
   SStorePack b i es ->
     [pad <> b <> ".pack" <> showT (length es) <> "[" <> renderExpr i <> "] = (" <> T.intercalate ", " (map renderExpr es) <> ")"]
+  STgStorePack a i es ->
+    [pad <> a <> ".pack" <> showT (length es) <> "[" <> renderExpr i <> "] = (" <> T.intercalate ", " (map renderExpr es) <> ")"]
   SLoadPackVia ns t b e i ->
     [ pad
         <> "let ("

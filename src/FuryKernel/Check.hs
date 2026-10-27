@@ -402,6 +402,11 @@ checkTyping k =
           when (b.bufAccess == ReadOnly) $ bad ("A store to the read-only buffer " <> n <> ".")
           traverse_ (expect ("A value stored to " <> n) b.bufType) es
         Nothing -> bad ("No buffer " <> n <> ".")
+    STgStorePack n i es -> do
+      index ("threadgroup array " <> n) i
+      case Map.lookup n arrays of
+        Just a -> traverse_ (expect ("A value stored to " <> n) a.tgType) es
+        Nothing -> bad ("No threadgroup array " <> n <> ".")
     SIf _ c th el -> do
       expect "The condition of an if" TBool c
       within (ifPlace c) (scoped (traverse_ stmt th))
@@ -691,6 +696,7 @@ backward ok ss after = case ss of
 storedBy :: Stmt -> Set Name
 storedBy = \case
   STgStore n _ _ -> Set.singleton n
+  STgStorePack n _ _ -> Set.singleton n
   SFragStore (FThreadgroup n) _ _ _ -> Set.singleton n
   _ -> Set.empty
 
@@ -758,7 +764,11 @@ checkPacks caps k = nub [locatedAt (Location k.kernelName (reverse place)) f | (
     SLoadPackVia ns _ t _ _ -> case Map.lookup t tables of
       Just tb -> checkPack caps tb.tableType (fromIntegral (length ns)) tb.tableAlign
       Nothing -> []
+    STgStorePack a _ es -> case Map.lookup a arrays of
+      Just arr -> checkPack caps arr.tgType (fromIntegral (length es)) (tgAlign arr)
+      Nothing -> []
     _ -> []
+  arrays = Map.fromList [(a.tgName, a) | a <- k.kernelTgArrays]
   -- The typing check reports unknown buffers.
   width b n = case Map.lookup b buffers of
     Just buf -> checkPack caps buf.bufType (fromIntegral n) buf.bufAlign

@@ -189,6 +189,12 @@ tests =
               ]
         map (.findingRule) (packed [src] [SLoadPack (map (T.pack . ("v" <>) . show) [0 .. 7 :: Int]) TF32 "src" (lu 0)])
           @?= [Packs, Packs]
+    , testCase "packs: to threadgroup arrays, as wide as a lane loads, of the array's type" $ do
+        let tg body = checkIR (targetCaps @T32) (base body) {kernelTgArrays = [TgArray "t" TF32 64]}
+        tg [STgStorePack "t" (lu 1) (map f32 [1, 2, 3, 4]), STgStorePack "t" (lu 3) (map f32 [1, 2])] @?= []
+        map (.findingRule) (tg [STgStorePack "t" (lu 0) (map f32 [1 .. 8])]) @?= [Packs, Packs]
+        map (.findingMessage) (tg [STgStorePack "t" (lu 0) [f32 1, ELit (LU32 2)], STgStorePack "u" (lu 0) [f32 1, f32 2]])
+          @?= ["A value stored to t is u32, not f32.", "No threadgroup array u."]
     , testCase "packs: of no elements, asked no alignment" $ do
         let src = Buffer "src" ReadOnly TF32 16 (ELit (LU32 64))
         [f.findingMessage | f <- checkIR (targetCaps @T32) (base [SLoadPack [] TF32 "src" (lu 0)]) {kernelBuffers = [src]}, f.findingRule == Packs]

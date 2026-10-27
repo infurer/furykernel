@@ -307,6 +307,17 @@ stmt env grp active s = unless (null active) $ case s of
     forM_ (concat ordered) $ \(ix, v) -> do
       checkBounds b arr ix
       lift (writeArray arr (fromIntegral ix) $! v)
+  STgStorePack a i es -> do
+    let width = toInteger (length es)
+    writes <- forM active $ \l -> do
+      j <- eval env grp l i >>= index
+      vs <- forM es (eval env grp l)
+      pure (zip [j * width ..] vs)
+    arr <- maybe (throwE (Internal ("threadgroup array " <> a))) pure (Map.lookup a grp.groupTg)
+    ordered <- shuffle writes
+    forM_ (concat ordered) $ \(ix, v) -> do
+      checkBounds a arr ix
+      lift (writeArray arr (fromIntegral ix) $! Just $! v)
   SIf _ c th el -> do
     conds <- forM active $ \l -> (l,) <$> (eval env grp l c >>= bool)
     block env grp [l | (l, True) <- conds] th
