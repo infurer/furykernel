@@ -271,12 +271,28 @@ nix fmt && git diff --exit-code &&
     node and every cache stored into by one, rows and caches of at least
     one element, each index below what it indexes, attention over a ring
     reading no more positions than it holds). `.Eval` gives them
-    their meaning in f64, rounding only where a cache stores bf16. Caches
-    are bound sparsely, by the slots of a ring or the blocks of a paged
-    pool a step uses (a pool's blocks each an array of its own, reached
-    through a table of their addresses); it refuses a binding of another
-    size than its source declares, and a read or store of a slot or block
-    not bound: over a checked program it returns, never throws. `.Plan`
+    their meaning in f64, rounding only where a cache stores bf16, a
+    step's rows storing and attending in row order, as if one at a time
+    (so a ring shorter than a step still gives each row its keys)
+    (`evaluateStored`: over what kernels stored, the caches as they left
+    them and the rows they staged, each store checked against its
+    value's bound). Every value carries a bound, how far a kernel's
+    binary32 value can be from it, derived through the program for
+    kernels that keep to a contract: binary32 throughout, with +, −, ×,
+    /, sqrt and fma correctly rounded, fused or not, sums and products
+    in any order, subnormal operands and results perhaps zeros of their
+    signs; exp and log within 4 ulp, tanh within 5, sin and cos within 4,
+    rsqrt within 2; RMSNorm, RoPE (its angle the binary32 product of the
+    position and the frequency), GELU, softcap, routes and attention in
+    the forms `Eval.hs` states. A store is right iff it lies between the
+    bf16 roundings of the exact value less and plus its bound; past a
+    route or an arg-max the bounds leave undecided, and where a value can
+    overflow, values are unbounded. Caches are bound sparsely, by the
+    slots of a ring or the blocks of a paged pool a step uses (a pool's
+    blocks each an array of its own, reached through a table of their
+    addresses); it refuses a binding of another size than its source
+    declares, and a read or store of a slot or block not bound: over a
+    checked program it returns, never throws. `.Plan`
     turns a checked program into steps, one kernel launch each: anchors
     (linear layers, attention) set a step's grid; other operations are
     recomputed in every threadgroup from stored values, or run on a linear
@@ -285,14 +301,19 @@ nix fmt && git diff --exit-code &&
     threadgroups of a step made; light steps hold stores into caches,
     attention's combine (once: its step stores what later steps read
     and makes the outputs that need nothing more) and the outputs no
-    anchor computes. Gated
+    anchor computes. A store into
+    a ring without room for a step's rows of one sequence
+    (`optSequenceRows`) past the positions a row reads is staged: a light
+    step keeps its values, the attention reads the step's own positions
+    there, and a light step after the last attention reading the ring
+    lands them. Gated
     (`optGated`), the routes routed layers read, and those the program
     outputs, are stored by a light step before the first step that reads
     a table, so that an engine can fetch the routed weights, and read
     the other routes, in between. A placement never changes a value's
     arithmetic, only where it runs.
-    A combine step names no cache, and `nodeCost` what recomputing an
-    operation costs, as the planner counts it.
+    A combine step names only the caches it lands in, and `nodeCost` what
+    recomputing an operation costs, as the planner counts it.
   - `FuryKernel`: what a kernel author imports.
 - `test/`: the test suite, tasty with hedgehog properties, all from one
   seed unless `--hedgehog-replay` gives another. Conversions are
@@ -325,9 +346,14 @@ nix fmt && git diff --exit-code &&
   interpreter's bits and refusals (a dimension out of its range or off
   its multiple). Programs: the gate, the evaluator on small cases
   (caches bound sparsely, a paged pool of 2^33 elements by two of its
-  blocks), and the planner's
+  blocks; a step's rows through a ring shorter than the step, as its rows
+  one at a time; its bounds refusing wrong stores and a well-conditioned
+  value's neighbours, and taking binary32's right ones through
+  cancellation, at subnormal and overflow ties, NaN, RoPE far into the
+  context and long dots), and the planner's
   steps for a mixture-of-experts decoder layer, a head and an embedding,
-  against golden text.
+  against golden text, stores staged where a ring hasn't room for a
+  step's rows.
   `test/no-compile/`: programs static mode must reject, each at one
   place, with the message it must reject them with on its one
   `-- EXPECT:` line.

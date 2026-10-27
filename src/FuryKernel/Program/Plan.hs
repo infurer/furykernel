@@ -28,13 +28,23 @@ Within a step a threadgroup has only what it computes itself.
   elements of different tiles, attention's combine of its splits. The
   tile is stored, and the operation is recomputed from it later.
 * __Light steps__ hold what no anchor step can: stores into caches, which
-  must run once per element and finish before attention reads them;
-  attention's combine, whose cost grows with the context, before the
-  linear layer that reads it; and the program's outputs that no anchor
-  computes. An output a combine makes that a later step reads too is
-  stored by the step that combines it, so that no step combines it
-  again; a program's output made only from what that step has is made
-  and stored there.
+  must run once per element and land before attention reads them, or
+  are staged for it; attention's combine, whose cost grows with the
+  context, before the linear layer that reads it; and the program's
+  outputs that no anchor computes. An output a combine makes that a
+  later step reads too is stored by the step that combines it, so that
+  no step combines it again; a program's output made only from what that
+  step has is made and stored there.
+* __Staged stores__: a store into a ring lands before the attention that
+  reads the ring if the ring has room for a step's rows of one sequence
+  ('optSequenceRows'), at consecutive positions, past the positions a row
+  reads (its window, or with none every position below the bound): rows
+  at most the ring's length less that, and one. Otherwise storing first
+  would overwrite keys the step's first rows read, and the store is
+  staged: a light step keeps its values as the cache holds them, the
+  attention reads the step's own positions from there and the rest from
+  the ring, and the first light step after the last attention reading the
+  ring lands them in it.
 
 Every value's arithmetic is fixed by the program, so a placement changes
 where it runs, never its bits: with the canonical reduction orders of the
@@ -83,6 +93,7 @@ import FuryKernel.IR (Name)
 import FuryKernel.Program.Check (CheckedProgram, checkedProgram)
 import FuryKernel.Program.Graph
 import FuryKernel.Type (ScalarType (..), scalarTypeName)
+import Numeric.Natural (Natural)
 
 ------------------------------------------------------------------------------
 -- Plans
@@ -118,6 +129,10 @@ data Work
     Combine NodeId
   | -- | A store into a cache, once per element.
     Effect NodeId
+  | -- | A staged store into a ring: its values kept for attention, once per element.
+    Stage NodeId
+  | -- | A staged store landing in its ring, once per element.
+    Land NodeId
   deriving stock (Eq, Show)
 
 workNode :: Work -> NodeId
@@ -127,6 +142,8 @@ workNode = \case
   Epilogue n -> n
   Combine n -> n
   Effect n -> n
+  Stage n -> n
+  Land n -> n
 
 stepAnchors :: Step -> [NodeId]
 stepAnchors s = [n | Anchor n <- s.stepWork]
@@ -156,6 +173,8 @@ data Form
     Elements ScalarType
   | -- | Attention's partials: per split, its maximum, sum and accumulator.
     Partials
+  | -- | A staged store's values, as the cache holds them.
+    Staged SourceId
   deriving stock (Eq, Ord, Show)
 
 ------------------------------------------------------------------------------
@@ -222,11 +241,30 @@ data PlanOptions = PlanOptions
   ids of routes the program outputs, which the engine reads then too: a
   prediction of a later layer's experts, say.
   -}
+  , optSequenceRows :: Natural
+  {- ^ The most rows of one sequence a step holds, at consecutive
+  positions: a store into a ring without room for them past what a row
+  reads is staged.
+  -}
   }
   deriving stock (Eq, Show)
 
+-- | A step of one row per sequence, as decode's.
 defaultPlanOptions :: PlanOptions
-defaultPlanOptions = PlanOptions {optHorizontal = True, optGated = False}
+defaultPlanOptions = PlanOptions {optHorizontal = True, optGated = False, optSequenceRows = 1}
+
+{- | How many rows of one sequence, at consecutive positions, a step can
+store into a ring of this length before an attention reads it, with this
+window over positions below this bound: the length less the positions a
+row reads (the window, or with none every position below the bound), and
+one.
+-}
+ringRoom :: Natural -> Maybe Natural -> Natural -> Natural
+ringRoom len window bound
+  | seen > len = 0
+  | otherwise = len - seen + 1
+ where
+  seen = fromMaybe bound window
 
 -- | Where a value is.
 data Avail
@@ -253,13 +291,17 @@ data PS = PS
   , closed :: Seq StepB
   , open :: Maybe StepB
   , next :: Int
+  , landing :: [(Int, NodeId, SourceId)]
+  {- ^ Staged stores to land: each after this step, the last attention's
+  that reads the ring.
+  -}
   }
 
 plan :: PlanOptions -> CheckedProgram -> Plan
 plan opts checked = Plan p (map finish (toList final.closed))
  where
   p = checkedProgram checked
-  final = execState (mapM_ node p.programNodes >> outputs >> closeOpen) (PS Map.empty Seq.empty Nothing 0)
+  final = execState (mapM_ node p.programNodes >> outputs >> landRest >> closeOpen) (PS Map.empty Seq.empty Nothing 0 [])
 
   nodes = Map.fromList [(n.nodeId, n) | n <- p.programNodes]
   producer = Map.fromList [(v, n) | n <- p.programNodes, v <- n.nodeOutputs]
@@ -270,6 +312,30 @@ plan opts checked = Plan p (map finish (toList final.closed))
   opOf n = maybe (Input (SourceId 0)) (.nodeOp) (Map.lookup n nodes)
   typeOf v = maybe TF32 (.valueType) (programValue p v)
   outsOf n = maybe [] (.nodeOutputs) (Map.lookup n nodes)
+
+  -- Stores into rings without room for a step's rows of one sequence
+  -- past what the rows of an attention later in the program read.
+  staged :: Set NodeId
+  staged =
+    Set.fromList
+      [ n.nodeId
+      | (i, n) <- zip [0 :: Int ..] p.programNodes
+      , KvStore (StoreAt c _ _) _ <- [n.nodeOp]
+      , Just Source {sourceKind = SCache (Ring _ _ len _) _} <- [programSource p c]
+      , or
+          [ opts.optSequenceRows > ringRoom len a.attnWindow (positionBound pos)
+          | r <- drop (i + 1) p.programNodes
+          , Attend a _ (AttendTo k v pos _) <- [r.nodeOp]
+          , c `elem` [k, v]
+          ]
+      ]
+  positionBound s = case programSource p s of
+    Just Source {sourceKind = SRowInts _ bound} -> bound
+    _ -> 0
+
+  -- A ring's staged store, and the last attention that reads the ring.
+  stagedInto c = listToMaybe [n.nodeId | n <- p.programNodes, KvStore (StoreAt c' _ _) _ <- [n.nodeOp], c' == c, n.nodeId `Set.member` staged]
+  lastReader c = listToMaybe (reverse [n.nodeId | n <- p.programNodes, Attend _ _ (AttendTo k v _ _) <- [n.nodeOp], c `elem` [k, v]])
 
   -- The cost of a virtual value's chain: the dearest node in it.
   availOf :: ValueId -> State PS Avail
@@ -325,16 +391,28 @@ plan opts checked = Plan p (map finish (toList final.closed))
     modify' (\s -> s {open = Just sb, next = i + 1})
     pure sb
 
-  -- The open light step, or a new one.
+  -- The open light step, or a new one; staged stores due land in it.
   lightStep :: State PS ()
-  lightStep =
+  lightStep = do
     gets (.open) >>= \case
       Just sb | null sb.sbFamily, not (any isAnchor sb.sbWork) -> pure ()
       _ -> void (newStep Nothing)
+    i <- openIndex
+    due <- gets (\s -> [l | l@(after, _, _) <- s.landing, maybe False (> after) i])
+    forM_ due $ \(_, n, c) -> do
+      addWork (Land n)
+      modify' $ \s -> case s.open of
+        Just sb -> s {open = Just sb {sbWrites = Set.insert c sb.sbWrites}}
+        Nothing -> s
+    modify' (\s -> s {landing = filter (`notElem` due) s.landing})
    where
     isAnchor = \case
       Anchor _ -> True
       _ -> False
+
+  -- Staged stores still to land do, after the last step.
+  landRest :: State PS ()
+  landRest = gets (null . (.landing)) >>= \done -> unless done lightStep
 
   addWork :: Work -> State PS ()
   addWork w = modify' $ \s -> case s.open of
@@ -463,6 +541,10 @@ plan opts checked = Plan p (map finish (toList final.closed))
     addWork (Anchor n.nodeId)
     i <- openIndex
     forM_ i $ \s -> mapM_ (`setAvail` tile s) n.nodeOutputs
+    -- The staged stores into the rings it is the last to read land after it.
+    forM_ i $ \s ->
+      forM_ [(store, c) | Attend _ _ (AttendTo k v _ _) <- [n.nodeOp], c <- nub [k, v], lastReader c == Just n.nodeId, Just store <- [stagedInto c]] $ \(store, c) ->
+        modify' (\ps -> ps {landing = ps.landing <> [(s, store, c)]})
    where
     -- Attention's tile holds its splits' partials, which nothing but its
     -- combine reads: its outputs are partials from the start.
@@ -556,20 +638,27 @@ plan opts checked = Plan p (map finish (toList final.closed))
       _ -> pure Cheap
 
   effect :: Node -> State PS ()
-  effect n = do
-    let ins = opValues n.nodeOp
-    avails <- traverse availOf ins
-    i <- openIndex
-    let onTile = [v | (v, ATile s _) <- zip ins avails, Just s == i]
-    if not (null onTile) && pointwise n.nodeOp && length onTile == length ins
-      then addWork (Epilogue n.nodeId)
-      else do
+  effect n
+    | n.nodeId `Set.member` staged = do
         lightStep
         mapM_ chain ins
-        addWork (Effect n.nodeId)
-    modify' $ \s -> case s.open of
-      Just sb -> s {open = Just sb {sbWrites = sb.sbWrites <> Set.fromList [c | c@(SourceId _) <- take 1 (opSources n.nodeOp)]}}
-      Nothing -> s
+        addWork (Stage n.nodeId)
+        sequence_ [addStore (Stored x (Staged c)) | KvStore (StoreAt c _ _) x <- [n.nodeOp]]
+    | otherwise = do
+        avails <- traverse availOf ins
+        i <- openIndex
+        let onTile = [v | (v, ATile s _) <- zip ins avails, Just s == i]
+        if not (null onTile) && pointwise n.nodeOp && length onTile == length ins
+          then addWork (Epilogue n.nodeId)
+          else do
+            lightStep
+            mapM_ chain ins
+            addWork (Effect n.nodeId)
+        modify' $ \s -> case s.open of
+          Just sb -> s {open = Just sb {sbWrites = sb.sbWrites <> Set.fromList [c | c@(SourceId _) <- take 1 (opSources n.nodeOp)]}}
+          Nothing -> s
+   where
+    ins = opValues n.nodeOp
 
   -- The engine's values: whatever isn't stored yet is, at the end.
   outputs :: State PS ()
@@ -594,8 +683,10 @@ plan opts checked = Plan p (map finish (toList final.closed))
   nodeOrder (NodeId k) = k
   valueOrder (ValueId k) = k
 
-  -- A combine reads only attention's partials.
+  -- A stage holds its values apart from the cache, and a combine reads only
+  -- attention's partials.
   caches = \case
+    Stage _ -> []
     Combine _ -> []
     w -> case opOf (workNode w) of
       KvStore (StoreAt c _ _) _ -> [c]
@@ -606,19 +697,27 @@ plan opts checked = Plan p (map finish (toList final.closed))
   readsOf :: StepB -> [Stored]
   readsOf sb =
     nub
-      [ st
-      | w <- toList sb.sbWork
-      , v <- readsOfWork w
-      , st <- storedBefore sb.sbIndex v
-      , wanted w st.storedForm
-      ]
+      ( [ st
+        | w <- toList sb.sbWork
+        , v <- readsOfWork w
+        , st <- storedBefore sb.sbIndex v
+        , wanted w st.storedForm
+        ]
+          <> [st | w <- toList sb.sbWork, c <- stagesRead w, st <- stagedBefore sb.sbIndex c]
+      )
    where
     -- A combine reads partials; everything else reads elements.
     wanted w form = case (w, form) of
       (Combine _, Partials) -> True
       (Combine _, _) -> False
       (_, Partials) -> False
+      (_, Staged _) -> False
       _ -> True
+    -- Attention reads the stages of the rings it reads, a land its own.
+    stagesRead = \case
+      Anchor n | Attend _ _ (AttendTo k v _ _) <- opOf n -> nub [k, v]
+      Land n | KvStore (StoreAt c _ _) _ <- opOf n -> [c]
+      _ -> []
     inStep = Set.fromList [v | w <- toList sb.sbWork, isMaking w, v <- outsOf (workNode w)]
     isMaking = \case
       Combine _ -> True
@@ -626,8 +725,11 @@ plan opts checked = Plan p (map finish (toList final.closed))
       Recompute _ -> True
       Epilogue _ -> True
       Effect _ -> False
+      Stage _ -> False
+      Land _ -> False
     readsOfWork = \case
       Combine n -> outsOf n
+      Land _ -> []
       w -> [v | v <- opValues (opOf (workNode w)), v `Set.notMember` inStep]
 
   storedBefore :: Int -> ValueId -> [Stored]
@@ -644,6 +746,15 @@ plan opts checked = Plan p (map finish (toList final.closed))
     Just Node {nodeOp = Input _} -> True
     _ -> False
 
+  stagedBefore :: Int -> SourceId -> [Stored]
+  stagedBefore s c =
+    [ st
+    | sb <- toList final.closed
+    , sb.sbIndex < s
+    , st <- toList sb.sbStores
+    , st.storedForm == Staged c
+    ]
+
   name :: StepB -> Name
   name sb =
     "s"
@@ -652,13 +763,16 @@ plan opts checked = Plan p (map finish (toList final.closed))
       <> case [opOf n | Anchor n <- toList sb.sbWork] of
         [] -> case mapMaybe effectOrStore (toList sb.sbWork) of
           (w : _) -> w
-          [] -> "light"
+          []
+            | not (null [() | Land _ <- toList sb.sbWork]) -> "land"
+            | otherwise -> "light"
         anchors -> T.intercalate "_" (nub (map familyWord anchors))
    where
     effectOrStore = \case
       Effect _ -> Just "store"
+      Stage _ -> Just "store"
       Combine _ -> Just "combine"
-      Recompute _ -> case toList sb.sbStores of
+      Recompute _ -> case [st | st <- toList sb.sbStores, Elements _ <- [st.storedForm]] of
         st : _ -> (.valueName) <$> programValue p st.storedValue
         [] -> Nothing
       _ -> Nothing
@@ -688,7 +802,10 @@ renderPlan pl =
           Epilogue _ -> "epilogue " <> label
           Combine _ -> "combine " <> label
           Effect _ -> "effect " <> label
+          Stage _ -> "stage " <> label
+          Land _ -> "land " <> label
   stored st =
     maybe "?" (.valueName) (programValue p st.storedValue) <> case st.storedForm of
       Elements t -> " " <> scalarTypeName t
       Partials -> " partials"
+      Staged c -> " staged for " <> maybe "?" (.sourceName) (programSource p c)

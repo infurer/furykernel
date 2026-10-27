@@ -11,9 +11,10 @@ module Test.FuryKernel.ProgramTest (
 ) where
 
 import Control.Exception qualified as E
-import Control.Monad (foldM, void)
+import Control.Monad (foldM, void, when)
 import Data.Char (isDigit)
-import Data.Either (fromLeft)
+import Data.Either (fromLeft, isRight)
+import Data.List (unzip4, zip4)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
@@ -24,8 +25,8 @@ import FuryKernel.Program
 import FuryKernel.Program.Eval
 import FuryKernel.Type (ScalarType (..))
 import FuryKernel.Variant (splitJoin)
-import GHC.Float (float2Double)
-import Hedgehog (Gen, Property, annotateShow, evalIO, failure, forAll, forAllWith, property, success, (===))
+import GHC.Float (double2Float, float2Double)
+import Hedgehog (Gen, Property, annotateShow, assert, evalIO, failure, forAll, forAllWith, property, success, (===))
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Numeric.Natural (Natural)
@@ -266,6 +267,7 @@ tests =
             , "    effect store_o"
             , "    reads o f32"
             ]
+    , testCase "attention's output read by a scale and a norm: the evaluator over what its kernels stored agrees with its own" evalMixed
     , testCase "every test program's plans read only what earlier steps stored, under every set of options" $
         [ (prog.programName, opts, found)
         | prog <- planned
@@ -274,6 +276,60 @@ tests =
         , not (null found)
         ]
           @?= []
+    , testCase "a ring with room for a step's rows of one sequence past its window: its stores land before the attention" $ do
+        let opts = defaultPlanOptions {optSequenceRows = 3}
+            pl = plan opts (checked ringProgram)
+        [w | s <- pl.planSteps, w <- s.stepWork, isStaging w] @?= []
+        planIssues opts pl @?= []
+    , testCase "a ring without that room: its stores staged, the attention reading them there, landing after it with its combine" $ do
+        let opts = defaultPlanOptions {optSequenceRows = 4}
+            pl = plan opts (checked ringProgram)
+        renderPlan pl
+          @?= T.unlines
+            [ "plan ring"
+            , "  step s0_store"
+            , "    stage store_k"
+            , "    stage store_v"
+            , "    reads kv f32"
+            , "    reads vv f32"
+            , "    stores kv staged for k"
+            , "    stores vv staged for v"
+            , "  step s1_attend"
+            , "    anchor o"
+            , "    reads q f32"
+            , "    reads kv staged for k"
+            , "    reads vv staged for v"
+            , "    stores o partials"
+            , "  step s2_combine"
+            , "    land store_k"
+            , "    land store_v"
+            , "    combine o"
+            , "    reads kv staged for k"
+            , "    reads vv staged for v"
+            , "    reads o partials"
+            , "    stores o f32"
+            ]
+        planIssues opts pl @?= []
+    , testCase "a combine step names the caches it lands in, not attention's: it reads only the partials" $ do
+        let cachesOf rows = [s.stepCaches | s <- (plan defaultPlanOptions {optSequenceRows = rows} (checked ringProgram)).planSteps, s.stepName == "s2_combine"]
+        cachesOf 3 @?= [[]]
+        fmap length (cachesOf 4) @?= [2]
+    , testCase "PlanCheck refuses a staged store landing with its attention, and stores first or staged against the ring's room" $ do
+        let opts = defaultPlanOptions {optSequenceRows = 4}
+            pl = plan opts (checked ringProgram)
+            first = plan defaultPlanOptions (checked ringProgram)
+            lands = [w | s <- pl.planSteps, w@(Land _) <- s.stepWork]
+            -- The lands moved into the attention's step.
+            early = pl {planSteps = [s {stepWork = filter (not . isLand) s.stepWork <> [w | s.stepName == "s1_attend", w <- lands]} | s <- pl.planSteps]}
+        assertBool "a land in the attention's step passed" (any ("lands in a step no later than o's" `T.isInfixOf`) (planIssues opts early))
+        planIssues opts first
+          @?= [ "store_k: stored first, though its ring hasn't room for a step's rows of one sequence"
+              , "store_v: stored first, though its ring hasn't room for a step's rows of one sequence"
+              ]
+        planIssues defaultPlanOptions pl
+          @?= [ "store_k: staged, though its ring has room for a step's rows of one sequence"
+              , "store_v: staged, though its ring has room for a step's rows of one sequence"
+              ]
     , testCase "the gate names what is wrong" $
         either (map (.findingRule)) (const []) (checkProgram badProgram) @?= [Shapes, Shapes]
     , testCase "the gate bounds a routed layer's ids by its table's entries" $ do
@@ -373,6 +429,14 @@ tests =
           @?= Left "tokens: row 0 holds 9, which isn't below its bound of 4."
     , testCase "the evaluator: a linear layer, a norm and a softcap" evalSmall
     , testCase "the evaluator: attention over one stored position returns its value" evalAttention
+    , testCase "the evaluator, given what kernels stored: a rounding the bound allows kept, a further one refused" evalStored
+    , testCase "the evaluator's bounds refuse a store of a well-conditioned value a step or two off, or truncated" boundsRefuse
+    , testCase "the evaluator's bounds take binary32's stores through cancellation, at subnormal ties and the overflow tie, and NaN" boundsAccept
+    , testCase "the evaluator's bounds take a rotary embedding's binary32 stores far into the context, its angles products or from tables" boundsLongRope
+    , testProperty "the evaluator's bounds take the stores of long binary32 dot products, summed in order or pairwise" boundsLongDots
+    , testProperty "the evaluator's bounds refuse the bf16 steps beside a well-conditioned dot product's rounding" boundsTight
+    , testProperty "the evaluator: a step's rows attend as if they ran one at a time, through a ring shorter than the step" evalCausal
+    , testCase "the evaluator, given what kernels staged: each row's staged values read, the cache holding the last" evalStaged
     , testCase "the evaluator: routes take the top k, ties to the lower index" evalRoute
     , testCase "the evaluator binds caches sparsely: two blocks of a paged pool of 2^33 elements, one slot of a ring" evalSparse
     , testProperty "bf16 rounding of a double agrees with narrowing a float" roundingAgrees
@@ -574,14 +638,25 @@ planned =
   , attnMixed
   , attnKept
   , predicting
+  , ringProgram
   ]
+
+isStaging, isLand :: Work -> Bool
+isStaging = \case
+  Stage _ -> True
+  Land _ -> True
+  _ -> False
+isLand = \case
+  Land _ -> True
+  _ -> False
 
 -- | Every set of the planner's options.
 optionSets :: [PlanOptions]
 optionSets =
-  [ defaultPlanOptions {optHorizontal = h, optGated = g}
+  [ defaultPlanOptions {optHorizontal = h, optGated = g, optSequenceRows = r}
   | h <- [True, False]
   , g <- [False, True]
+  , r <- [1, 64]
   ]
 
 {- | Attention over two stored positions of a ring, whose output @rest@
@@ -881,7 +956,7 @@ evalTotal = property $ do
  where
   forced = \case
     Left e -> T.length e
-    Right ev -> length (show (Map.toList ev.evalValues, Map.toList ev.evalOutputs, Map.toList ev.evalCaches))
+    Right ev -> length (show (Map.toList ev.evalValues, Map.toList ev.evalBounds, Map.toList ev.evalOutputs, Map.toList ev.evalCaches))
   describe b' =
     show
       ( b'.bindRows
@@ -986,6 +1061,320 @@ evalAttention = do
       stored = map (float2Double . widenBF16 . narrowBF16) [0.1, 0.2]
   fmap (Map.lookup "o" . (.evalOutputs)) (evaluate (checked p) b)
     @?= Right (Just [stored <> stored])
+
+evalStored :: IO ()
+evalStored = do
+  let p = program "attention" $ do
+        q <- input "q" (Shape 4 2) TF32
+        pos <- rowInts "position" 1 4
+        slot <- rowInts "slot" 1 1
+        k <- cache "k" (Ring 1 1 4 2)
+        v <- cache "v" (Ring 1 1 4 2)
+        one <- weight "one" [1]
+        kv <- input "kv" (Shape 2 2) TF32 >>= scaleBy "scaled" one
+        kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = slot} kv
+        kvStore "store_v" StoreAt {storeCache = v, storePositions = pos, storeSequences = slot} kv
+        o <- attend "o" (AttnSpec 2 1 2 Nothing 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
+        output "o" o
+      b =
+        (bindings 1)
+          { bindInputs = Map.fromList [("q", [[1, 2, 3, 4]]), ("kv", [[midpoint, 0.2]])]
+          , bindWeights = Map.fromList [("one", [1])]
+          , bindRowInts = Map.fromList [("position", [[0]]), ("slot", [[0]])]
+          , bindCaches = Map.fromList [("k", slots 8 (replicate 8 0)), ("v", slots 8 (replicate 8 0))]
+          }
+      -- Halfway between bf16's 1 and the next, 1 + 2^-7, where binary32's
+      -- rounding takes it either way; the evaluator rounds to the even 1.
+      midpoint = 1 + 2 ^^ (-8 :: Int)
+      ulp = 2 ^^ (-7 :: Int)
+      second = roundBF16 0.2
+      kept x = Kept (Map.fromList [("k", slots 8 ([x, second] <> replicate 6 0)), ("v", slots 8 ([x, second] <> replicate 6 0))]) Map.empty
+  fmap (Map.lookup "o" . (.evalOutputs)) (evaluateStored (kept (1 + ulp)) (checked p) b)
+    @?= Right (Just [[1 + ulp, second, 1 + ulp, second]])
+  case evaluateStored (kept (1 + 2 * ulp)) (checked p) b of
+    Left _ -> pure ()
+    Right _ -> assertFailure "a store two steps from the midpoint's rounding was kept"
+  case evaluateStored (kept (1 - ulp / 2)) (checked p) b of
+    Left _ -> pure ()
+    Right _ -> assertFailure "a store a step below the midpoint's rounding was kept"
+
+-- | attn_mixed over the caches as its own evaluation leaves them: the same outputs.
+evalMixed :: IO ()
+evalMixed = do
+  let b =
+        (bindings 1)
+          { bindInputs = Map.fromList [("q", [[1, 2, 3, 4]]), ("kv", [[0.5, -0.25]]), ("vv", [[1, 2]])]
+          , bindWeights = Map.fromList [("attn_scale", [2]), ("o_proj", [if i `mod` 5 == 0 then 1 else 0.5 | i <- [0 .. 15 :: Int]])]
+          , bindRowInts = Map.fromList [("position", [[0]]), ("slot", [[1]])]
+          , bindCaches = Map.fromList [("k", slots 8 (replicate 16 0)), ("v", slots 8 (replicate 16 0))]
+          }
+  case evaluate (checked attnMixed) b of
+    Left e -> assertFailure (T.unpack e)
+    Right e ->
+      fmap (.evalOutputs) (evaluateStored (Kept e.evalCaches Map.empty) (checked attnMixed) b) @?= Right e.evalOutputs
+
+------------------------------------------------------------------------------
+-- The evaluator's bounds
+
+-- | A linear layer of one output over @k@ inputs, stored into a cache of one element.
+storedDot :: Natural -> Program
+storedDot k = program "stored_dot" $ do
+  x <- input "x" (wholeRow k) TF32
+  w <- weight "w" [1, k]
+  pos <- rowInts "position" 1 1
+  slot <- rowInts "slot" 1 1
+  c <- cache "c" (Ring 1 1 1 1)
+  y <- linear "y" w 0 x
+  kvStore "store" StoreAt {storeCache = c, storePositions = pos, storeSequences = slot} y
+  output "y" y
+
+dotBindings :: [Double] -> [Double] -> Bindings
+dotBindings w x =
+  (bindings 1)
+    { bindInputs = Map.fromList [("x", [x])]
+    , bindWeights = Map.fromList [("w", w)]
+    , bindRowInts = Map.fromList [("position", [[0]]), ("slot", [[0]])]
+    , bindCaches = Map.fromList [("c", slots 1 [0])]
+    }
+
+-- | Whether the evaluator keeps a kernel's store of @k@ for the dot product of @w@ and @x@.
+keeps :: [Double] -> [Double] -> Double -> Bool
+keeps w x k = isRight (evaluateStored (Kept (Map.fromList [("c", slots 1 [k])]) Map.empty) (checked (storedDot (fromIntegral (length x)))) (dotBindings w x))
+
+boundsRefuse :: IO ()
+boundsRefuse = do
+  -- 1, exactly: bf16's steps are 2^-8 below it, 2^-7 above.
+  let one = keeps [1] [1]
+  assertBool "1 was refused for 1" (one 1)
+  assertBool "two steps below 1 were kept for 1" (not (one (1 - 2 ^^ (-7 :: Int))))
+  assertBool "a step below 1 was kept for 1" (not (one (1 - 2 ^^ (-8 :: Int))))
+  assertBool "a step above 1 was kept for 1" (not (one (1 + 2 ^^ (-7 :: Int))))
+  -- 1 + 3 · 2^-9 rounds up to 1 + 2^-7; truncated, it is 1.
+  let up = keeps [1] [1 + 3 * 2 ^^ (-9 :: Int)]
+      down = keeps [1] [-(1 + 3 * 2 ^^ (-9 :: Int))]
+  assertBool "the rounding was refused" (up (1 + 2 ^^ (-7 :: Int)))
+  assertBool "the truncation was kept" (not (up 1))
+  assertBool "the negative rounding was refused" (down (-(1 + 2 ^^ (-7 :: Int))))
+  assertBool "the negative truncation was kept" (not (down (-1)))
+
+boundsAccept :: IO ()
+boundsAccept = do
+  -- binary32 adds 1 + 2^-30 to 1, then -1 to 0; the exact sum is 2^-30.
+  let cancelled = keeps [1, 1, 1] [1, 2 ^^ (-30 :: Int), -1]
+      f32 = [1, 2 ^^ (-30 :: Int), -1] :: [Float]
+  sum f32 @?= 0
+  assertBool "binary32's 0 was refused" (cancelled 0)
+  assertBool "the exact 2^-30 was refused" (cancelled (2 ^^ (-30 :: Int)))
+  -- 2^-134 is halfway between 0 and bf16's least subnormal, 2^-133.
+  let tie = keeps [2 ^^ (-67 :: Int)] [2 ^^ (-67 :: Int)]
+  assertBool "0 was refused at the tie" (tie 0)
+  assertBool "2^-133 was refused at the tie" (tie (2 ^^ (-133 :: Int)))
+  -- 3 · 2^-134 is halfway between the subnormals 2^-133 and 2^-132.
+  let subnormals = keeps [3 * 2 ^^ (-67 :: Int)] [2 ^^ (-67 :: Int)]
+  assertBool "2^-133 was refused" (subnormals (2 ^^ (-133 :: Int)))
+  assertBool "2^-132 was refused" (subnormals (2 ^^ (-132 :: Int)))
+  -- (2 - 2^-8) · 2^127 is halfway between bf16's largest finite value
+  -- and 2^128, which overflows to infinity.
+  let overflowing = keeps [2 ^^ (63 :: Int)] [(2 - 2 ^^ (-8 :: Int)) * 2 ^^ (64 :: Int)]
+  assertBool "the largest finite value was refused" (overflowing ((2 - 2 ^^ (-7 :: Int)) * 2 ^^ (127 :: Int)))
+  assertBool "infinity was refused" (overflowing (1 / 0))
+  assertBool "a step below the largest finite value was kept" (not (overflowing ((2 - 2 ^^ (-6 :: Int)) * 2 ^^ (127 :: Int))))
+  -- NaN stores as NaN.
+  let nan = keeps [1] [0 / 0]
+  assertBool "NaN was refused for NaN" (nan (0 / 0))
+  assertBool "0 was kept for NaN" (not (nan 0))
+
+-- | A head of 16 turned at positions below 2^18 by @θ@ = 10000, and stored.
+storedRope :: Program
+storedRope = program "stored_rope" $ do
+  x <- input "x" (Shape 16 16) TF32
+  pos <- rowInts "position" 1 262144
+  slot <- rowInts "slot" 1 1
+  c <- cache "c" (Ring 1 1 1 16)
+  turned <- rope "turned" (RopeSpec 10000 8 RopeHalves) pos x
+  kvStore "store" StoreAt {storeCache = c, storePositions = pos, storeSequences = slot} turned
+  output "turned" turned
+
+boundsLongRope :: IO ()
+boundsLongRope = do
+  let p = 262143 :: Int
+      xs = [0.3, -0.7, 1.1, 0.25, -1.3, 0.9, 0.6, -0.2, 0.45, -0.35, 0.8, -1.05, 0.15, 0.55, -0.65, 1.2] :: [Float]
+      freq i = 10000 ** negate (fromIntegral (2 * i) / 16) :: Double
+      -- The pairs (i, i + 8) turned by the cosines and sines given, in binary32.
+      turnedBy :: (Int -> (Float, Float)) -> [Double]
+      turnedBy cs =
+        [ roundBF16 (float2Double v)
+        | j <- [0 .. 15]
+        , let i = j `mod` 8
+              (c, s) = cs i
+              v = if j < 8 then xs !! j * c - xs !! (j + 8) * s else xs !! j * c + xs !! i * s
+        ]
+      -- The angle a binary32 product of the position and the frequency,
+      -- rounded once.
+      byProduct i = let angle = fromIntegral p * double2Float (freq i) in (cos angle, sin angle)
+      -- Tables of 256 q · θ_i and r · θ_i for p = 256 q + r, rounded once,
+      -- by the angle-addition formulas.
+      byTables i =
+        let (q, r) = p `divMod` 256
+            at f n = double2Float (f (fromIntegral n * freq i))
+            (ch, sh, cl, sl) = (at cos (256 * q), at sin (256 * q), at cos r, at sin r)
+         in (ch * cl - sh * sl, sh * cl + ch * sl)
+      b =
+        (bindings 1)
+          { bindInputs = Map.fromList [("x", [map float2Double xs])]
+          , bindRowInts = Map.fromList [("position", [[fromIntegral p]]), ("slot", [[0]])]
+          , bindCaches = Map.fromList [("c", slots 16 (replicate 16 0))]
+          }
+      keptBy stored = evaluateStored (Kept (Map.fromList [("c", slots 16 stored)]) Map.empty) (checked storedRope) b
+  -- binary32's angles turn some elements to other bf16 than the exact ones do.
+  case fmap (Map.lookup "c" . (.evalCaches)) (evaluate (checked storedRope) b) of
+    Right (Just own) -> assertBool "binary32's angles rounded as the exact ones" (own /= slots 16 (turnedBy byProduct))
+    other -> assertFailure (show other)
+  mapM_
+    (\(how, stored) -> either (\err -> assertFailure (how <> ": " <> T.unpack err)) (const (pure ())) (keptBy stored))
+    [("products", turnedBy byProduct), ("tables", turnedBy byTables)]
+
+boundsLongDots :: Property
+boundsLongDots = property $ do
+  k <- forAll (Gen.element [2048, 4096])
+  w <- forAll (Gen.list (Range.singleton k) (Gen.float (Range.linearFrac (-1) 1)))
+  x <- forAll (Gen.list (Range.singleton k) (Gen.float (Range.linearFrac (-1) 1)))
+  let products = zipWith (*) w x
+      pairwise = \case
+        [] -> 0
+        [a] -> a
+        as -> let (l, r) = splitAt (length as `div` 2) as in pairwise l + pairwise r
+      -- Left to right.
+      inOrder = sum products
+      kept v = keeps (map float2Double w) (map float2Double x) (roundBF16 (float2Double v))
+  annotateShow (inOrder, pairwise products)
+  assert (kept inOrder)
+  assert (kept (pairwise products))
+
+{- | Positive terms, so that the dot product's bound is a few hundredths
+of a bf16 step: unless the exact value is nearer a midpoint than that, the
+bf16 values beside its rounding are refused.
+-}
+boundsTight :: Property
+boundsTight = property $ do
+  w <- forAll (Gen.list (Range.singleton 64) (Gen.float (Range.linearFrac 0.5 1)))
+  x <- forAll (Gen.list (Range.singleton 64) (Gen.float (Range.linearFrac 0.5 1)))
+  let ws = map float2Double w
+      xs = map float2Double x
+      exact = sum (zipWith (*) ws xs)
+      own = roundBF16 exact
+      step = 2 ^^ (exponent own - 8)
+      above = own + step
+      below = if own == 2 ^^ (exponent own - 1) then own - step / 2 else own - step
+      fromMidpoints = min (exact - (below + own) / 2) ((own + above) / 2 - exact) / exact
+  annotateShow (exact, fromMidpoints)
+  assert (keeps ws xs own)
+  when (fromMidpoints > 2 ^^ (-14 :: Int)) $ do
+    assert (not (keeps ws xs above))
+    assert (not (keeps ws xs below))
+
+{- | Attention over a ring of 4 positions with a window of 2: a step of a
+sequence's next @n@ positions evaluates as its rows one at a time do,
+outputs and the cache it leaves, though a step of more than 3 stores over
+positions its first rows read.
+-}
+ringProgram :: Program
+ringProgram = program "ring" $ do
+  q <- input "q" (Shape 4 2) TF32
+  pos <- rowInts "position" 1 64
+  slot <- rowInts "slot" 1 2
+  k <- cache "k" (Ring 2 1 4 2)
+  v <- cache "v" (Ring 2 1 4 2)
+  kv <- input "kv" (Shape 2 2) TF32
+  vv <- input "vv" (Shape 2 2) TF32
+  kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = slot} kv
+  kvStore "store_v" StoreAt {storeCache = v, storePositions = pos, storeSequences = slot} vv
+  o <- attend "o" (AttnSpec 2 1 2 (Just 2) 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
+  output "o" o
+
+-- | 'ringProgram', its keys and values scaled by a weight before they are stored.
+ringScaled :: Program
+ringScaled = program "ring_scaled" $ do
+  q <- input "q" (Shape 4 2) TF32
+  pos <- rowInts "position" 1 64
+  slot <- rowInts "slot" 1 2
+  k <- cache "k" (Ring 2 1 4 2)
+  v <- cache "v" (Ring 2 1 4 2)
+  one <- weight "one" [1]
+  kv <- input "kv" (Shape 2 2) TF32 >>= scaleBy "kv_scaled" one
+  vv <- input "vv" (Shape 2 2) TF32 >>= scaleBy "vv_scaled" one
+  kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = slot} kv
+  kvStore "store_v" StoreAt {storeCache = v, storePositions = pos, storeSequences = slot} vv
+  o <- attend "o" (AttnSpec 2 1 2 (Just 2) 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
+  output "o" o
+
+evalCausal :: Property
+evalCausal = property $ do
+  start <- forAll (Gen.int (Range.linear 0 9))
+  n <- forAll (Gen.int (Range.linear 1 9))
+  let element = Gen.double (Range.linearFrac (-2) 2)
+  qs <- forAll (Gen.list (Range.singleton n) (Gen.list (Range.singleton 4) element))
+  ks <- forAll (Gen.list (Range.singleton n) (Gen.list (Range.singleton 2) element))
+  vs <- forAll (Gen.list (Range.singleton n) (Gen.list (Range.singleton 2) element))
+  cache0 <- forAll (Gen.list (Range.singleton 16) element)
+  let caches0 = Map.fromList [("k", slots 8 cache0), ("v", slots 8 (reverse cache0))]
+      step these caches = do
+        let (ps, qr, kr, vr) = unzip4 these
+        evaluate
+          (checked ringProgram)
+          (bindings (length these))
+            { bindInputs = Map.fromList [("q", qr), ("kv", kr), ("vv", vr)]
+            , bindRowInts = Map.fromList [("position", [[fromIntegral p'] | p' <- ps]), ("slot", map (const [1]) ps)]
+            , bindCaches = caches
+            }
+      rows' = zip4 [start ..] qs ks vs
+      whole = step rows' caches0
+      oneByOne =
+        foldl
+          ( \acc r -> do
+              (outs, caches) <- acc
+              e <- step [r] caches
+              pure (outs <> Map.findWithDefault [] "o" e.evalOutputs, e.evalCaches)
+          )
+          (Right ([], caches0))
+          rows'
+  fmap (\e -> (Map.findWithDefault [] "o" e.evalOutputs, e.evalCaches)) whole === oneByOne
+
+evalStaged :: IO ()
+evalStaged = do
+  let
+    -- Positions 0 to 4 of slot 0: position 4 overwrites position 0. Row
+    -- 0's first element is halfway between bf16's 1 and 1 + 2^-7.
+    kvs = [[if i == 1 then 1 + 2 ^^ (-8 :: Int) else 0.1 * fromIntegral i, 0.2] | i <- [1 .. 5 :: Int]]
+    b =
+      (bindings 5)
+        { bindInputs = Map.fromList [("q", replicate 5 [1, 2, 3, 4]), ("kv", kvs), ("vv", kvs)]
+        , bindWeights = Map.fromList [("one", [1])]
+        , bindRowInts = Map.fromList [("position", [[i] | i <- [0 .. 4]]), ("slot", replicate 5 [0])]
+        , bindCaches = Map.fromList [("k", slots 8 (replicate 16 0)), ("v", slots 8 (replicate 16 0))]
+        }
+    -- The kernels staged each row's rounding, row 0's first element the
+    -- midpoint's other one.
+    ulp = 2 ^^ (-7 :: Int)
+    staged = [[roundBF16 x + (if r == 0 && j == 0 then ulp else 0) | (j, x) <- zip [0 :: Int ..] kv] | (r, kv) <- zip [0 :: Int ..] kvs]
+    left = concat (staged !! 4 : take 3 (drop 1 staged)) <> replicate 8 0
+    kept cache' = Kept (Map.fromList [("k", slots 8 cache'), ("v", slots 8 cache')]) (Map.fromList [("k", staged), ("v", staged)])
+    own = evaluate (checked ringScaled) b
+  case (evaluateStored (kept left) (checked ringScaled) b, own) of
+    (Right e, Right o) -> do
+      -- Row 1 reads row 0's staged key, which the cache no longer holds.
+      let rowOne = (!! 1) . Map.findWithDefault [] "o"
+      assertBool "row 1 reads row 0's staged values" (rowOne e.evalOutputs /= rowOne o.evalOutputs)
+      Map.lookup "k" e.evalCaches @?= Just (slots 8 left)
+    (Left err, _) -> assertFailure (T.unpack err)
+    (_, Left err) -> assertFailure (T.unpack err)
+  case evaluateStored (kept (concat (take 4 staged) <> replicate 8 0)) (checked ringScaled) b of
+    Left _ -> pure ()
+    Right _ -> assertFailure "a cache that kept a store a later row's overwrote was taken"
+  let twoOff = [[x + (if r == 0 && j == 0 then ulp else 0) | (j, x) <- zip [0 :: Int ..] row] | (r, row) <- zip [0 :: Int ..] staged]
+  case evaluateStored (Kept (Map.fromList [("k", slots 8 left), ("v", slots 8 left)]) (Map.fromList [("k", twoOff), ("v", twoOff)])) (checked ringScaled) b of
+    Left _ -> pure ()
+    Right _ -> assertFailure "a staged value two steps from the midpoint's rounding was taken"
 
 {- | Attention over a paged pool of 2^30 blocks of 4 positions, 2^33
 elements in all, its keys and values stored first.
