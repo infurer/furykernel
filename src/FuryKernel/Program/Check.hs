@@ -276,9 +276,10 @@ shapes p = reverse (execState (mapM_ node p.programNodes >> outputs) (St Map.emp
       shaped o a.valueShape TF32
     (Rope r _ _, [x], [pos], [o]) -> do
       f32 x
-      rowInts1 pos
-      expect (even x.valueShape.shapeSegment) "its heads have no halves"
-      expect (2 * r.ropeRotated <= x.valueShape.shapeSegment) "it rotates more pairs than a head has"
+      expect (r.ropeAxes > 0) "it has no axes"
+      expect (rowCount pos == Just r.ropeAxes) (pos.sourceName <> " is not " <> showT r.ropeAxes <> " u32 per row, a position an axis")
+      expect (x.valueShape.shapeSegment `mod` (2 * max 1 r.ropeAxes) == 0) "its heads have no halves for each axis"
+      expect (2 * r.ropeAxes * r.ropeRotated <= x.valueShape.shapeSegment) "it rotates more pairs than a head has"
       expect (r.ropeTheta > 0 && finite r.ropeTheta) "its theta isn't positive and finite"
       shaped o x.valueShape TF32
     (Softcap c _, [x], [], [o]) -> do

@@ -240,6 +240,9 @@ evaluateWith kept checked b = do
   int1 :: SourceId -> Either Text [Int]
   int1 s = map (fromIntegral . headOr 0) <$> intsOf s
 
+  intRows :: SourceId -> Either Text [[Int]]
+  intRows s = map (map fromIntegral) <$> intsOf s
+
   valueOf :: Env -> ValueId -> Either Text [Arr]
   valueOf env v = maybe (Left "A value read before it is made.") Right (Map.lookup v env.envValues)
 
@@ -358,14 +361,17 @@ evaluateWith kept checked b = do
         [arr (zipWith (\u v -> gelu form u * v) (elemsOf x) (elemsOf y)) | (x, y) <- zip as cs]
         [boundsArr (zipWith (\u v -> productA [geluBounds form u, v]) x y) | (x, y) <- zip aas cas]
     (Rope r pos x, [o]) -> do
-      ps <- int1 pos
+      ps <- intRows pos
       xs <- valueOf env x
       as <- approxOf env x
       let d = size' (shapeOf x).shapeSegment
+          part = d `div` size' r.ropeAxes
+          rotateHead positions h = concat (zipWith (rotate r part . fromIntegral) positions (chunks part h))
+          rotateBounds positions h = concat (zipWith (rotationBounds r part . fromIntegral) positions (chunks part h))
       put
         o
-        [arr (concatMap (rotate r d (fromIntegral position)) (chunks d (elemsOf xr))) | (position, xr) <- zip ps xs]
-        [arr (concatMap (rotationBounds r d (fromIntegral position)) (chunks d ar)) | (position, ar) <- zip ps as]
+        [arr (concatMap (rotateHead positions) (chunks d (elemsOf xr))) | (positions, xr) <- zip ps xs]
+        [arr (concatMap (rotateBounds positions) (chunks d ar)) | (positions, ar) <- zip ps as]
     (Softcap c x, [o]) -> do
       xs <- valueOf env x
       as <- approxOf env x

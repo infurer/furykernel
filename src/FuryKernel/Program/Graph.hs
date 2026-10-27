@@ -186,13 +186,16 @@ data Node = Node
   }
   deriving stock (Eq, Show)
 
-{- | A rotary position embedding on each head: the pairs 'ropePairs' names,
-@(i, i + d/2)@, for @i < rotated@ turn by @position · theta^(-2i/d)@, @d@
-the head's width; the other pairs stay as they are. Every pair rotates when @rotated = d/2@.
+{- | A rotary position embedding on each head, in @axes@ equal parts, the
+@a@th turned by the row's @a@th position (one, the usual embedding; two,
+an image patch's column and row): in a part of width @d@, the pairs
+'ropePairs' names, @(i, i + d/2)@, for @i < rotated@ turn by
+@position · theta^(-2i/d)@; the other pairs stay as they are. Every pair rotates when @rotated = d/2@.
 -}
 data RopeSpec = RopeSpec
   { ropeTheta :: Double
   , ropeRotated :: Natural
+  , ropeAxes :: Natural
   , ropePairs :: RopePairs
   }
   deriving stock (Eq, Show)
@@ -289,7 +292,9 @@ data Op
     GatedGelu Gelu ValueId
   | -- | @gelu(a) · b@, elementwise, the GELU of the given form.
     GeluMul Gelu ValueId ValueId
-  | -- | Each head (segment) rotated by the row's position, from the source.
+  | {- | Each head (segment) rotated by the row's positions, from the source,
+    as many a row as the embedding has axes.
+    -}
     Rope RopeSpec SourceId ValueId
   | -- | @cap · tanh(x / cap)@.
     Softcap Double ValueId
@@ -440,7 +445,18 @@ renderProgram p =
     ScaleBy w x -> "scale_by(" <> src w <> ", " <> value x <> ")"
     GatedGelu GeluTanh x -> "gated_gelu(" <> value x <> ")"
     GeluMul GeluTanh a b -> "gelu_mul(" <> value a <> ", " <> value b <> ")"
-    Rope r pos x -> "rope(" <> value x <> ", " <> src pos <> ", theta " <> double r.ropeTheta <> ", rotated " <> showT r.ropeRotated <> pairing r.ropePairs <> ")"
+    Rope r pos x ->
+      "rope("
+        <> value x
+        <> ", "
+        <> src pos
+        <> ", theta "
+        <> double r.ropeTheta
+        <> ", rotated "
+        <> showT r.ropeRotated
+        <> (if r.ropeAxes == 1 then "" else ", axes " <> showT r.ropeAxes)
+        <> pairing r.ropePairs
+        <> ")"
     Softcap c x -> "softcap(" <> value x <> ", " <> double c <> ")"
     Route r x -> "route(" <> value x <> ", k " <> showT r.routeK <> maybe "" ((", scale " <>) . src) r.routeExpertScale <> weighing r.routeWeights <> ")"
     CombineRanks w x -> "combine_ranks(" <> value w <> ", " <> value x <> ")"

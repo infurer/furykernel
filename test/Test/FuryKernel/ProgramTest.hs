@@ -449,6 +449,9 @@ tests =
     , testCase "the evaluator: a concatenation's row, the first's then the second's" evalConcat
     , testCase "the gate refuses to concatenate segments of other widths" $
         assertBool "a concatenation of other segments passed" (isLeft (checkProgram badConcat))
+    , testCase "the evaluator: a rotary embedding of two axes turns each half of a head by its own position" evalAxialRope
+    , testCase "the gate refuses a rotary embedding of two axes over one position" $
+        assertBool "two axes over one position passed" (isLeft (checkProgram (axialRope 1)))
     , testProperty "bf16 rounding of a double agrees with narrowing a float" roundingAgrees
     ]
 
@@ -493,8 +496,8 @@ layer kEqV = program (if kEqV then "layer_kv" else "layer") $ do
   qn <- rmsnorm "q_normed" eps (Just qNorm) 1 q
   kn <- rmsnorm "k_normed" eps (Just kNorm) 1 k
   vn <- rmsnorm "v_normed" eps Nothing 1 v
-  qr <- rope "q_rotated" (RopeSpec 10000 4 RopeHalves) pos qn
-  kr <- rope "k_rotated" (RopeSpec 10000 4 RopeHalves) pos kn
+  qr <- rope "q_rotated" (RopeSpec 10000 4 1 RopeHalves) pos qn
+  kr <- rope "k_rotated" (RopeSpec 10000 4 1 RopeHalves) pos kn
   kvStore "store_k" StoreAt {storeCache = kCache, storePositions = pos, storeSequences = slot} kr
   kvStore "store_v" StoreAt {storeCache = vCache, storePositions = pos, storeSequences = slot} vn
   o <- attend "attended" (AttnSpec 4 2 8 (Just 6) 1) qr AttendTo {attendKeys = kCache, attendValues = vCache, attendPositions = pos, attendSequences = slot}
@@ -957,7 +960,7 @@ bound or at it, the step's rows as given or one more.
 -}
 evalTotal :: Property
 evalTotal = property $ do
-  prog <- forAllWith (T.unpack . (.programName)) (Gen.element (planned <> [routedOver 8 8, overRing 4 Nothing 4]))
+  prog <- forAllWith (T.unpack . (.programName)) (Gen.element (planned <> [routedOver 8 8, axialRope 2, overRing 4 Nothing 4]))
   m <- forAll (Gen.int (Range.linear 0 3))
   b <- forAllWith describe (bindingsOf m prog)
   r <- evalIO (E.try (E.evaluate (forced (evaluate (checked prog) b))))
@@ -1202,7 +1205,7 @@ storedRope = program "stored_rope" $ do
   pos <- rowInts "position" 1 262144
   slot <- rowInts "slot" 1 1
   c <- cache "c" (Ring 1 1 1 16)
-  turned <- rope "turned" (RopeSpec 10000 8 RopeHalves) pos x
+  turned <- rope "turned" (RopeSpec 10000 8 1 RopeHalves) pos x
   kvStore "store" StoreAt {storeCache = c, storePositions = pos, storeSequences = slot} turned
   output "turned" turned
 
@@ -1486,6 +1489,33 @@ badConcat = program "mismatched" $ do
   y <- input "y" (Shape 2 1) TF32
   joined <- concatenate "joined" x y
   output "joined" joined
+
+-- | A head of 8 turned in two parts of 4 by a position each, its source as wide as given.
+axialRope :: Natural -> Program
+axialRope width = program "axial" $ do
+  x <- input "x" (Shape 8 8) TF32
+  pos <- rowInts "position" width 64
+  turned <- rope "turned" (RopeSpec 10000 2 2 RopeHalves) pos x
+  output "turned" turned
+
+evalAxialRope :: IO ()
+evalAxialRope = do
+  let b =
+        (bindings 2)
+          { bindInputs = Map.fromList [("x", replicate 2 [1, 2, 3, 4, 5, 6, 7, 8])]
+          , bindRowInts = Map.fromList [("position", [[3, 0], [0, 5]])]
+          }
+      -- A part of 4: pairs (0, 2) and (1, 3), turned by p and p / 100.
+      turn :: Double -> [Double] -> [Double]
+      turn at [a, c, e, g] =
+        let (s0, c0) = (sin at, cos at)
+            (s1, c1) = (sin (at / 100), cos (at / 100))
+         in [a * c0 - e * s0, c * c1 - g * s1, e * c0 + a * s0, g * c1 + c * s1]
+      turn _ xs = xs
+      expected = [turn 3 [1, 2, 3, 4] <> [5, 6, 7, 8], [1, 2, 3, 4] <> turn 5 [5, 6, 7, 8]]
+  case fmap (Map.lookup "turned" . (.evalOutputs)) (evaluate (checked (axialRope 2)) b) of
+    Right (Just rows) -> assertBool (show rows) (and (zipWith (\r e -> maximum (zipWith (\u v -> abs (u - v)) r e) < 1e-12) rows expected))
+    other -> assertFailure (show other)
 
 roundingAgrees :: Property
 roundingAgrees = property $ do
