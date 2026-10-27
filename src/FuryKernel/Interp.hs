@@ -383,6 +383,16 @@ stmt env grp active s = unless (null active) $ case s of
     forM_ [(r, c) | r <- [0 .. 7], c <- [0 .. 7]] $ \(r, c) -> do
       v <- lift (readArray arr (g * 64 + fromIntegral (r * 8 + c)))
       fragMemoryWrite m (base + r * stride + c) v
+  SFragScaleRows f a i -> simdGroups f $ \g lane -> do
+    base <- eval env grp lane i >>= index
+    arr <- maybe (throwE (Internal ("threadgroup array " <> a))) pure (Map.lookup a grp.groupTg)
+    ff <- fragment f
+    forM_ [0 .. 7] $ \r -> do
+      checkBounds a arr (base + r)
+      scale <- lift (readArray arr (fromIntegral (base + r))) >>= maybe (throwE (UninitializedRead a (fromIntegral (base + r)))) pure >>= asFloat
+      forM_ [0 .. 7] $ \col -> do
+        v <- lift (readArray ff (g * 64 + fromIntegral (r * 8 + col))) >>= asFloat
+        lift (writeArray ff (g * 64 + fromIntegral (r * 8 + col)) $! VF32 (v * scale))
   SFragConvert d src -> simdGroups d $ \g _ -> do
     fs <- fragment src
     fd <- fragment d

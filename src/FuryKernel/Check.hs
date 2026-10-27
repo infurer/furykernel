@@ -436,6 +436,13 @@ checkTyping k =
       index ("the stride of the fragment store of " <> n) st
       t <- fragmentType n
       element ("The fragment " <> n <> " stored to") m t False
+    SFragScaleRows f a i -> do
+      index ("the scales of " <> f) i
+      tf <- fragmentType f
+      unless (tf == Just TF32) $ bad ("The fragment " <> f <> " scaled by rows is not of f32.")
+      case Map.lookup a arrays of
+        Just arr -> when (arr.tgType /= TF32) $ bad ("The scales of " <> f <> " come from " <> a <> ", an array of " <> scalarTypeName arr.tgType <> ".")
+        Nothing -> bad ("No threadgroup array " <> a <> ".")
     SFragConvert d s -> do
       td <- fragmentType d
       _ <- fragmentType s
@@ -611,6 +618,7 @@ checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
     SFragStore _ i st n -> fragment n [i, st]
     SFragMma d _ _ _ -> fragment d []
     SFragConvert d _ -> fragment d []
+    SFragScaleRows f _ i -> fragment f [i]
     _ -> pure ()
    where
     uni = uniIn stored

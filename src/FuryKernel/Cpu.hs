@@ -523,6 +523,17 @@ stmt depth = \case
       , "    }"
       , "}"
       ]
+  SFragScaleRows f a i -> do
+    i' <- ex i
+    pure . simdGroups $
+      [ "let fk_base = " <> index i' <> ";"
+      , "for fk_r in 0..8 {"
+      , "    let fk_scale = " <> rustIdent a <> "[fk_base + fk_r];"
+      , "    for fk_c in 0..8 {"
+      , "        " <> rustIdent f <> "[fk_simd][fk_r * 8 + fk_c] = " <> rustIdent f <> "[fk_simd][fk_r * 8 + fk_c] * fk_scale;"
+      , "    }"
+      , "}"
+      ]
   -- Fragments are kept as f32 here: widening is a copy.
   SFragConvert d s -> pure (simdGroups [rustIdent d <> "[fk_simd] = " <> rustIdent s <> "[fk_simd];"])
   SFragMma d a b c ->

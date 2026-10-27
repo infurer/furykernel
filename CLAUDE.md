@@ -129,7 +129,8 @@ nix fmt && git diff --exit-code &&
     device or threadgroup memory, plain or transposed (`fragLoad`,
     `fragLoadT`, `fragLoadTg`, `fragLoadTgT`), widened into f32 ones
     element by element (`fragConvert`), multiplied into f32
-    accumulators (`fragMma`) and stored; every lane takes part
+    accumulators (`fragMma`), their rows scaled each by its own
+    (`fragScaleRows`) and stored; every lane takes part
     (`Converged`).
   - `FuryKernel.Check`: the gate. `check` returns a `Checked` kernel, whose
     constructor is private, or the findings; backends take only `Checked`

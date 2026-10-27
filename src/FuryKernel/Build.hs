@@ -135,6 +135,7 @@ module FuryKernel.Build (
   fragLoadTgT,
   fragMma,
   fragConvert,
+  fragScaleRows,
   fragStore,
   fragStoreTg,
   whenU,
@@ -1051,6 +1052,14 @@ fragment of bf16 or f16 loaded as it is stored, multiplied in f32.
 -}
 fragConvert :: (Converged r) => Frag Float -> Frag a -> K r ()
 fragConvert (Frag d) (Frag s) = K (emit (IR.SFragConvert d s))
+
+{- | @fragScaleRows f a i@: each row @r@ of the f32 fragment @f@ multiplied
+by element @i + r@ of the threadgroup array @a@, wherever the target keeps
+the row's elements in its lanes: an accumulator rescaled row by row (a
+softmax's running sums as its maximum grows).
+-}
+fragScaleRows :: (Converged r) => Frag Float -> TgArr n Float -> Exp Word32 -> K r ()
+fragScaleRows (Frag f) (TgArr a) (Exp i) = K (emit (IR.SFragScaleRows f a i))
 
 -- | Stores a fragment to a buffer: its element @(r, c)@ at @index + r * stride + c@.
 fragStore :: (Converged r, Writable acc) => Buf t acc align a -> Exp Word32 -> Exp Word32 -> Frag a -> K r ()

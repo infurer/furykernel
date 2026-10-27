@@ -91,6 +91,7 @@ cases =
        , gemmCase "gemm_f16" (checked "gemm_f16" (gemm @F16)) (f16s 30) (f16s 31)
        , gemmCase "gemm_f32" (checked "gemm_f32" (gemm @Float)) (f32s 30) (f32s 31)
        , gemmCase "staged" (checked "staged" staged) (bf16s 32) (bf16s 33)
+       , gemmCase "scaled_rows" (checked "scaled_rows" scaledRows) (f32s 34) (bf16s 35)
        , tileCase "tiled" (checked "tiled" (tiled @1024 @1024 @4096 (GemmTile 64 64 16 4))) (70, 72, 48)
        , tileCase "tiled_narrow" (checked "tiled_narrow" (tiled @1024 @2048 @512 (GemmTile 32 64 32 1))) (70, 72, 64)
        , arithF32Case
@@ -185,6 +186,34 @@ staged = kernel "staged" $ do
         fragLoadTgT fb tile (col0 * 8) 8
         fragMma acc fa fb acc
         barrier
+      fragStore c (row0 * 16 + col0) 16 acc
+
+-- | f32 A against bf16 B widened into f32 fragments, the product's rows scaled.
+scaledRows :: Kernel Cpu
+scaledRows = kernel "scaled_rows" $ do
+  k <- dim "k" (DimRange 8 256 8)
+  a <- buffer @ReadOnly @16 @Float "a" (16 * k)
+  b <- buffer @ReadOnly @16 @BF16 "b" (16 * k)
+  c <- buffer @WriteOnly @16 @Float "c" 256
+  threads @128
+  groups 1
+  pure $ do
+    scales <- tgArray @8 @Float "scales"
+    pure $ do
+      forM_ [0 .. 7 :: Int] $ \r -> whenLane (threadIndex .== 0) (tgStore scales (fromIntegral r) (fromIntegral (2 ^ r :: Int) * 0.3))
+      barrier
+      row0 <- let_ "row0" ((simdGroupIndex `quotE` 2) * 8)
+      col0 <- let_ "col0" ((simdGroupIndex `remE` 2) * 8)
+      acc <- fragment @Float "acc"
+      fa <- fragment @Float "fa"
+      fbh <- fragment @BF16 "fbh"
+      fb <- fragment @Float "fb"
+      forU "p" 0 (k `quotE` 8) $ \p -> do
+        fragLoad fa a (row0 * k + p * 8) k
+        fragLoadT fbh b (col0 * k + p * 8) k
+        fragConvert fb fbh
+        fragMma acc fa fb acc
+      fragScaleRows acc scales 0
       fragStore c (row0 * 16 + col0) 16 acc
 
 -- | C = A · Bᵀ of bf16 rows through a GEMM tile, edges clamped.
