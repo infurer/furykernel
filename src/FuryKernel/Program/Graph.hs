@@ -49,6 +49,7 @@ module FuryKernel.Program.Graph (
   Op (..),
   RopeSpec (..),
   AttnSpec (..),
+  Reach (..),
   RouteSpec (..),
   RouteWeights (..),
   RopePairs (..),
@@ -203,6 +204,9 @@ data RopeSpec = RopeSpec
 {- | Decode attention: @heads@ query heads share @kvHeads@ key and value
 heads in groups; a query sees the positions of its row's sequence up to its
 own, the last @window@ of them if it has one; scores are scaled by @scale@.
+With a @reach@, a row sees up to its reach instead, at least its own
+position, the window's start still its own position's: an image's rows,
+which see one another.
 -}
 data AttnSpec = AttnSpec
   { attnHeads :: Natural
@@ -210,6 +214,16 @@ data AttnSpec = AttnSpec
   , attnHeadDim :: Natural
   , attnWindow :: Maybe Natural
   , attnScale :: Double
+  , attnReach :: Maybe Reach
+  }
+  deriving stock (Eq, Show)
+
+{- | How far a row's attention reads past its own position: to the position
+the source gives per row, at most @ahead@ past the row's own.
+-}
+data Reach = Reach
+  { reachSource :: SourceId
+  , reachAhead :: Natural
   }
   deriving stock (Eq, Show)
 
@@ -365,7 +379,7 @@ opSources = \case
   Route spec _ -> maybe [] pure spec.routeExpertScale
   CombineRanks {} -> []
   KvStore (StoreAt c p s) _ -> [c, p, s]
-  Attend _ _ (AttendTo k v p s) -> [k, v, p, s]
+  Attend a _ (AttendTo k v p s) -> [k, v, p, s] <> maybe [] (pure . (.reachSource)) a.attnReach
   Gather t tok _ -> [t, tok]
   Standardize b s _ _ -> [b, s]
   ArgMax _ -> []
@@ -481,6 +495,7 @@ renderProgram p =
         <> maybe "" ((", window " <>) . showT) a.attnWindow
         <> ", scale "
         <> double a.attnScale
+        <> maybe "" (\r -> ", reach " <> src r.reachSource <> " ahead " <> showT r.reachAhead) a.attnReach
         <> ")"
     Gather t tok f -> "gather(" <> src t <> ", " <> src tok <> ", factor " <> double f <> ")"
     Standardize b s f x -> "standardize(" <> value x <> ", " <> src b <> ", " <> src s <> ", factor " <> double f <> ")"

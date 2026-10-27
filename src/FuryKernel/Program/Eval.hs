@@ -13,7 +13,10 @@ with another approximation of it.
 
 A step's rows store into caches and attend over them in row order, as if
 they ran one at a time: a row's attention reads what the rows up to it
-stored, and the cache as the step found it for the rest. A ring without
+stored, and the cache as the step found it for the rest. A row whose
+attention reaches past its own position reads as the step's row that
+stored the position it reaches, if one did: the stores of the rows between
+are its too. A ring without
 room for a step's rows of one sequence past the positions a row reads (its
 length less the window, or with none the positions' bound, and one) still
 gives each row the keys it reads: a plan stages such a step's stores, and
@@ -98,7 +101,7 @@ import Control.Monad (foldM, forM, unless, when)
 import Data.Array.Unboxed (Array, UArray, bounds, listArray, (!), (//))
 import Data.Bits (countLeadingZeros)
 import Data.Foldable (for_)
-import Data.List (sortBy, transpose, zip4, zip5)
+import Data.List (sortBy, transpose, zip4, zip6)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isNothing, listToMaybe)
@@ -471,23 +474,32 @@ evaluateWith kept checked b = do
       kRead <- reader kSrc.sourceName
       vRead <- reader vSrc.sourceName
       ps <- int1 pos
+      reaches <- maybe (Right ps) (int1 . (.reachSource)) a.attnReach
+      for_ a.attnReach $ \r ->
+        case [(i, p', rc) | (i, p', rc) <- zip3 [0 :: Int ..] ps reaches, rc > p' + fromIntegral r.reachAhead] of
+          (i, p', rc) : _ -> Left (n.nodeName <> ": row " <> showT i <> " reaches " <> showT rc <> ", more than " <> showT r.reachAhead <> " past its position, " <> showT p' <> ".")
+          [] -> pure ()
       seqs <- intsOf slot
       qs <- valueOf env q
       qbs <- boundsOf env q
       let d = fromIntegral a.attnHeadDim
           heads = fromIntegral a.attnHeads
           group = heads `div` fromIntegral a.attnKvHeads
-      rowsOut <- forM (zip5 [0 :: Int ..] ps seqs qs qbs) $ \(r, position, sq, qr, qb) -> do
+      rowsOut <- forM (zip6 [0 :: Int ..] ps reaches seqs qs qbs) $ \(r0, position, reach, sq, qr, qb) -> do
         let first = maybe 0 (\w -> max 0 (position - fromIntegral w + 1)) a.attnWindow
-            ts = [first .. position]
+            ts = [first .. max position reach]
+            -- A row reading past its own position reads as the row of the
+            -- step that stored its reach, if one did: the stores of the
+            -- rows between are its too.
+            r = headOr r0 [j | (j, p', s') <- zip3 [0 ..] ps seqs, j >= r0, p' == reach, s' == sq]
         fmap unzipConcat . forM [0 .. heads - 1] $ \h -> do
           let kvh = h `div` group
               query = sliceArr qr (h * d) d
               queryA = zipWith Approx (elemsOf query) (elemsOf (sliceArr qb (h * d) d))
           keys <- forM ts $ \t -> do
             (u, at) <- cacheIndex layout sq t kvh
-            ks <- forM [0 .. d - 1] $ \i -> kRead r t (u, at + i)
-            vs <- forM [0 .. d - 1] $ \i -> vRead r t (u, at + i)
+            ks <- forM [0 .. d - 1] $ \i -> kRead r0 r t (u, at + i)
+            vs <- forM [0 .. d - 1] $ \i -> vRead r0 r t (u, at + i)
             pure (ks, vs)
           let exacts = arr . map (.aExact)
               arrays = [(exacts ks, exacts vs) | (ks, vs) <- keys]
@@ -533,20 +545,27 @@ evaluateWith kept checked b = do
     put = putIn env
     putIn e o vs bs = Right e {envValues = Map.insert o vs e.envValues, envBounds = Map.insert o bs e.envBounds}
 
-    {- An element of a cache as row @r@ reads it for position @t@: the
-    last store of a row up to @r@, if the step stored the element, else
-    the cache as the step found it. A store of another position there
-    means the step stored more of a sequence than its cache keeps. Each
-    comes with how far from it what the kernels stored can be. -}
-    reader :: Name -> Either Text (Int -> Int -> Element -> Either Text Approx)
+    {- An element of a cache as row @r@ reads it for position @t@, reading
+    to the row @r'@ of its reach (@r@ itself if it reads to its own
+    position): a row's store of position @t@ after @r@, up to @r'@, if one
+    stored it, as a lowering that stages the step's keys and values gives
+    it; else the last store of a row up to @r@, if the step stored the
+    element, else the cache as the step found it. A store of another
+    position there by a row up to @r@ means the step stored more of a
+    sequence than its cache keeps. Each comes with how far from it what
+    the kernels stored can be. -}
+    reader :: Name -> Either Text (Int -> Int -> Int -> Element -> Either Text Approx)
     reader name = case (Map.lookup name env.envStores, Map.lookup name env.envCaches) of
-      (Just (before, stores), _) -> Right $ \r t at ->
-        case reverse (takeWhile (\(r', _, _) -> r' <= r) (Map.findWithDefault [] at stores)) of
-          (_, t', value) : _
-            | t' == t -> Right value
-            | otherwise -> Left (name <> ": row " <> showT r <> " reads position " <> showT t <> " where a row stored " <> showT t' <> ".")
-          [] -> found name before at
-      (Nothing, Just units) -> Right $ \_ _ at -> found name units at
+      (Just (before, stores), _) -> Right $ \r r' t at ->
+        let upTo k = reverse (takeWhile (\(j, _, _) -> j <= k) (Map.findWithDefault [] at stores))
+         in case [value | (j, t', value) <- upTo r', j > r, t' == t] of
+              value : _ -> Right value
+              [] -> case upTo r of
+                (_, t', value) : _
+                  | t' == t -> Right value
+                  | otherwise -> Left (name <> ": row " <> showT r <> " reads position " <> showT t <> " where a row stored " <> showT t' <> ".")
+                [] -> found name before at
+      (Nothing, Just units) -> Right $ \_ _ _ at -> found name units at
       (Nothing, Nothing) -> Left ("No cache " <> name <> ".")
     found name units at = maybe (Left (unbound name at)) (Right . exactA) (unitAt units at)
 

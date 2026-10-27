@@ -365,11 +365,15 @@ tests =
           @?= [Finding Bounds "store_k: the bound of blocks, 5, is more than the 4 blocks of k."]
         findings (storedInto (Paged 4 2 1 2) 4 5)
           @?= [Finding Bounds "store_k: the bound of position, 5, is more than the 4 positions of its block table."]
-    , testCase "the gate bounds attention's blocks by the pool's, and its positions by its block table" $ do
-        findings (pagedAttention 4 4) @?= []
-        findings (pagedAttention 5 4)
+    , testCase "the gate bounds attention's blocks by the pool's, and its positions and reach by its block table" $ do
+        findings (pagedAttention 4 4 True) @?= []
+        findings (pagedAttention 5 4 True)
           @?= [Finding Bounds "o: the bound of blocks, 5, is more than the 4 blocks of k."]
-        findings (pagedAttention 4 5)
+        findings (pagedAttention 4 5 True)
+          @?= [ Finding Bounds "o: the bound of position, 5, is more than the 4 positions of its block table."
+              , Finding Bounds "o: the bound of reach, 5, is more than the 4 positions of its block table."
+              ]
+        findings (pagedAttention 4 5 False)
           @?= [Finding Bounds "o: the bound of position, 5, is more than the 4 positions of its block table."]
     , testCase "the gate holds attention over a ring to the positions it holds: its window, or every position below the bound" $ do
         findings (overRing 2 (Just 2) 64) @?= []
@@ -378,6 +382,17 @@ tests =
         findings (overRing 4 Nothing 4) @?= []
         findings (overRing 4 Nothing 5)
           @?= [Finding Bounds "o: with no window it reads every position below the bound of position, 5, more than the 4 that k's ring holds."]
+    , testCase "the gate holds a reach over a ring to what the ring holds: ahead at most its length less the window" $ do
+        findings (reaching 4 (Just 2) (Just 2) 64 64) @?= []
+        findings (reaching 4 (Just 2) (Just 3) 64 64)
+          @?= [Finding Bounds "o: its window of 2 and its reach of up to 3 past a row's own position read 5 positions, more than the 4 that k's ring holds."]
+        findings (reaching 4 (Just 2) (Just 3) 64 3) @?= []
+        findings (reaching 4 Nothing (Just 2) 2 64) @?= []
+        findings (reaching 4 Nothing (Just 3) 2 64)
+          @?= [Finding Bounds "o: with no window, and a reach of up to 3 past a row's own position, it reads every position below 5, more than the 4 that k's ring holds."]
+        findings (reaching 4 Nothing (Just 10) 2 4) @?= []
+        findings (reaching 4 Nothing (Just 0) 5 4)
+          @?= [Finding Bounds "o: with no window, and a reach of up to 0 past a row's own position, it reads every position below 5, more than the 4 that k's ring holds."]
     , testCase "sources keep their names, and the gate refuses one given twice" $ do
         [s.sourceName | s <- weightTwice.programSources] @?= ["x", "embed", "embed"]
         findings weightTwice @?= [Finding Names "The name embed is used 2 times."]
@@ -451,6 +466,7 @@ tests =
     , testCase "the evaluator: a concatenation's row, the first's then the second's" evalConcat
     , testCase "the gate refuses to concatenate segments of other widths" $
         assertBool "a concatenation of other segments passed" (isLeft (checkProgram badConcat))
+    , testCase "the evaluator: rows that reach past their own positions see the keys later rows store, staged where a ring keeps too few" evalReach
     , testCase "the evaluator: a rotary embedding of two axes turns each half of a head by its own position" evalAxialRope
     , testCase "the evaluator: a gather of several rows sums them, times its factor" evalPooledGather
     , testCase "the evaluator: standardizing scales, subtracts the bias and scales again" evalStandardize
@@ -509,7 +525,7 @@ layer kEqV = program (if kEqV then "layer_kv" else "layer") $ do
   kr <- rope "k_rotated" (RopeSpec 10000 4 1 RopeHalves) pos kn
   kvStore "store_k" StoreAt {storeCache = kCache, storePositions = pos, storeSequences = slot} kr
   kvStore "store_v" StoreAt {storeCache = vCache, storePositions = pos, storeSequences = slot} vn
-  o <- attend "attended" (AttnSpec 4 2 8 (Just 6) 1) qr AttendTo {attendKeys = kCache, attendValues = vCache, attendPositions = pos, attendSequences = slot}
+  o <- attend "attended" (AttnSpec 4 2 8 (Just 6) 1 Nothing) qr AttendTo {attendKeys = kCache, attendValues = vCache, attendPositions = pos, attendSequences = slot}
   out <- linear "attn_out" wo 0 o
   outNormed <- rmsnorm "attn_out_normed" eps (Just postAttn) 1 out
   x1 <- add "x1" x outNormed
@@ -697,7 +713,7 @@ attending name rest = program name $ do
   vv <- input "vv" (Shape 2 2) TF32
   kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = slot} kv
   kvStore "store_v" StoreAt {storeCache = v, storePositions = pos, storeSequences = slot} vv
-  o <- attend "o" (AttnSpec 2 1 2 Nothing 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
+  o <- attend "o" (AttnSpec 2 1 2 Nothing 1 Nothing) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
   rest o
 
 -- | A softcap of attention's output, which the program outputs.
@@ -854,16 +870,18 @@ storedInto layout sequences positions = program "stored_into" $ do
   kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = sq} x
 
 {- | Attention over a pool of four blocks of two positions, through a block
-table of two below @blocks@, from positions below @positions@.
+table of two below @blocks@, from positions below @positions@ and, if
+asked, a reach below them too.
 -}
-pagedAttention :: Natural -> Natural -> Program
-pagedAttention blocks positions = program "paged" $ do
+pagedAttention :: Natural -> Natural -> Bool -> Program
+pagedAttention blocks positions withReach = program "paged" $ do
   q <- input "q" (Shape 4 2) TF32
   pos <- rowInts "position" 1 positions
   blockTable <- rowInts "blocks" 2 blocks
+  reach <- if withReach then Just <$> rowInts "reach" 1 positions else pure Nothing
   k <- cache "k" (Paged 4 2 1 2)
   v <- cache "v" (Paged 4 2 1 2)
-  attend "o" (AttnSpec 2 1 2 Nothing 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = blockTable} >>= output "o"
+  attend "o" (AttnSpec 2 1 2 Nothing 1 ((\r -> Reach r.srcId positions) <$> reach)) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = blockTable} >>= output "o"
 
 {- | Attention over a ring of @len@ positions, from positions below
 @bound@, with the window given.
@@ -875,7 +893,7 @@ overRing len window bound = program "over_ring" $ do
   slot <- rowInts "slot" 1 1
   k <- cache "k" (Ring 1 1 len 2)
   v <- cache "v" (Ring 1 1 len 2)
-  attend "o" (AttnSpec 1 1 2 window 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot} >>= output "o"
+  attend "o" (AttnSpec 1 1 2 window 1 Nothing) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot} >>= output "o"
 
 -- | A weight named twice.
 weightTwice :: Program
@@ -937,7 +955,7 @@ noQueryHeads = program "no_heads" $ do
   slot <- rowInts "slot" 1 1
   k <- cache "k" (Ring 1 2 4 2)
   v <- cache "v" (Ring 1 2 4 2)
-  attend "o" (AttnSpec 0 2 2 Nothing 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot} >>= output "o"
+  attend "o" (AttnSpec 0 2 2 Nothing 1 Nothing) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot} >>= output "o"
 
 -- | An input of 10 elements in segments of 3.
 unevenInput :: Program
@@ -1074,7 +1092,7 @@ evalAttention = do
         kv <- input "kv" (Shape 2 2) TF32
         kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = slot} kv
         kvStore "store_v" StoreAt {storeCache = v, storePositions = pos, storeSequences = slot} kv
-        o <- attend "o" (AttnSpec 2 1 2 Nothing 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
+        o <- attend "o" (AttnSpec 2 1 2 Nothing 1 Nothing) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
         output "o" o
       b =
         (bindings 1)
@@ -1098,7 +1116,7 @@ evalStored = do
         kv <- input "kv" (Shape 2 2) TF32 >>= scaleBy "scaled" one
         kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = slot} kv
         kvStore "store_v" StoreAt {storeCache = v, storePositions = pos, storeSequences = slot} kv
-        o <- attend "o" (AttnSpec 2 1 2 Nothing 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
+        o <- attend "o" (AttnSpec 2 1 2 Nothing 1 Nothing) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
         output "o" o
       b =
         (bindings 1)
@@ -1313,7 +1331,7 @@ ringProgram = program "ring" $ do
   vv <- input "vv" (Shape 2 2) TF32
   kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = slot} kv
   kvStore "store_v" StoreAt {storeCache = v, storePositions = pos, storeSequences = slot} vv
-  o <- attend "o" (AttnSpec 2 1 2 (Just 2) 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
+  o <- attend "o" (AttnSpec 2 1 2 (Just 2) 1 Nothing) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
   output "o" o
 
 -- | 'ringProgram', its keys and values scaled by a weight before they are stored.
@@ -1329,7 +1347,7 @@ ringScaled = program "ring_scaled" $ do
   vv <- input "vv" (Shape 2 2) TF32 >>= scaleBy "vv_scaled" one
   kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = slot} kv
   kvStore "store_v" StoreAt {storeCache = v, storePositions = pos, storeSequences = slot} vv
-  o <- attend "o" (AttnSpec 2 1 2 (Just 2) 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
+  o <- attend "o" (AttnSpec 2 1 2 (Just 2) 1 Nothing) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
   output "o" o
 
 evalCausal :: Property
@@ -1413,7 +1431,7 @@ hugePool = program "huge_pool" $ do
   kv <- input "kv" (Shape 2 2) TF32
   kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = blocks} kv
   kvStore "store_v" StoreAt {storeCache = v, storePositions = pos, storeSequences = blocks} kv
-  o <- attend "o" (AttnSpec 1 1 2 Nothing 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = blocks}
+  o <- attend "o" (AttnSpec 1 1 2 Nothing 1 Nothing) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = blocks}
   output "o" o
 
 evalSparse :: IO ()
@@ -1451,7 +1469,7 @@ evalSparse = do
         kv <- input "kv" (Shape 2 2) TF32
         kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = slot} kv
         kvStore "store_v" StoreAt {storeCache = v, storePositions = pos, storeSequences = slot} kv
-        o <- attend "o" (AttnSpec 2 1 2 Nothing 1) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
+        o <- attend "o" (AttnSpec 2 1 2 Nothing 1 Nothing) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
         output "o" o
       ringStep caches =
         (bindings 1)
@@ -1499,6 +1517,55 @@ badConcat = program "mismatched" $ do
   y <- input "y" (Shape 2 1) TF32
   joined <- concatenate "joined" x y
   output "joined" joined
+
+{- | Two rows of a sequence, a query of zeros each, so that attention is
+the mean of the values a row sees: with a reach of the second position,
+both rows see both; without, the first only its own.
+-}
+evalReach :: IO ()
+evalReach = do
+  let b =
+        (bindings 2)
+          { bindInputs = Map.fromList [("q", replicate 2 [0, 0, 0, 0]), ("kv", [[0.5, 0.25], [0.75, 1]])]
+          , bindRowInts = Map.fromList [("position", [[0], [1]]), ("slot", [[0], [0]]), ("reach", [[1], [1]])]
+          , bindCaches = Map.fromList [("k", slots 8 (replicate 8 0)), ("v", slots 8 (replicate 8 0))]
+          }
+      outputs p b' = fmap (Map.lookup "o" . (.evalOutputs)) (evaluate (checked p) b')
+  outputs (reaching 4 Nothing (Just 3) 4 4) b @?= Right (Just (replicate 2 [0.625, 0.625, 0.625, 0.625]))
+  outputs (reaching 4 Nothing Nothing 4 4) b @?= Right (Just [[0.5, 0.25, 0.5, 0.25], [0.625, 0.625, 0.625, 0.625]])
+  -- A ring of four, a window of two and a reach of up to two ahead, rows 1
+  -- to 3 an image's: the step stores six positions, so rows 4 and 5 store
+  -- over positions 0 and 1, which row 1 reads, as a lowering that stages
+  -- the step's keys and values gives it.
+  let kvs = [[0.5, 0.25], [0.75, 1], [0.25, 0.5], [0.5, 0.25], [1, 0.5], [0.25, 0.75]]
+      image =
+        (bindings 6)
+          { bindInputs = Map.fromList [("q", replicate 6 [0, 0, 0, 0]), ("kv", kvs)]
+          , bindRowInts = Map.fromList [("position", [[t] | t <- [0 .. 5]]), ("slot", replicate 6 [0]), ("reach", [[0], [3], [3], [3], [4], [5]])]
+          , bindCaches = Map.fromList [("k", slots 8 (replicate 8 0)), ("v", slots 8 (replicate 8 0))]
+          }
+      rowsOf = fmap (fmap (\rs -> [take 2 r | (i, r) <- zip [0 :: Int ..] rs, i `elem` [0, 1, 4, 5]]))
+  rowsOf (outputs (reaching 4 (Just 2) (Just 2) 8 8) image) @?= Right (Just [[0.5, 0.25], [0.5, 0.5], [0.75, 0.375], [0.625, 0.625]])
+  -- A row whose reach runs past its declared ahead.
+  outputs (reaching 4 (Just 2) (Just 1) 8 8) image @?= Left "o: row 1 reaches 3, more than 1 past its position, 1."
+
+{- | Attention over a ring of @len@ positions, with the window and the reach
+ahead given, from positions below @positionBound@ and reaches below
+@reachBound@: its keys and values stored first.
+-}
+reaching :: Natural -> Maybe Natural -> Maybe Natural -> Natural -> Natural -> Program
+reaching len window ahead positionBound reachBound = program "reach" $ do
+  q <- input "q" (Shape 4 2) TF32
+  pos <- rowInts "position" 1 positionBound
+  slot <- rowInts "slot" 1 1
+  reach <- traverse (\n -> (`Reach` n) . (.srcId) <$> rowInts "reach" 1 reachBound) ahead
+  k <- cache "k" (Ring 1 1 len 2)
+  v <- cache "v" (Ring 1 1 len 2)
+  kv <- input "kv" (Shape 2 2) TF32
+  kvStore "store_k" StoreAt {storeCache = k, storePositions = pos, storeSequences = slot} kv
+  kvStore "store_v" StoreAt {storeCache = v, storePositions = pos, storeSequences = slot} kv
+  o <- attend "o" (AttnSpec 2 1 2 window 1 reach) q AttendTo {attendKeys = k, attendValues = v, attendPositions = pos, attendSequences = slot}
+  output "o" o
 
 -- | A head of 8 turned in two parts of 4 by a position each, its source as wide as given.
 axialRope :: Natural -> Program

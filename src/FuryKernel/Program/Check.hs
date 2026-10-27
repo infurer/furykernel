@@ -309,12 +309,14 @@ shapes p = reverse (execState (mapM_ node p.programNodes >> outputs) (St Map.emp
           (x.valueShape == Shape (cacheKvHeads layout * cacheHeadDim layout) (cacheHeadDim layout))
           ("its value isn't the " <> showT (cacheKvHeads layout) <> " heads of " <> showT (cacheHeadDim layout) <> " of " <> c.sourceName)
       _ -> expect False (c.sourceName <> " is not a cache")
-    (Attend a _ _, [q], [k, v, pos, slot], [o]) -> case (k.sourceKind, v.sourceKind) of
+    (Attend a _ _, [q], k : v : pos : slot : reach, [o]) -> case (k.sourceKind, v.sourceKind) of
       (SCache kl _, SCache vl _) -> do
         f32 q
         rowInts1 pos
+        mapM_ rowInts1 reach
+        expect (length reach == maybe 0 (const 1) a.attnReach) "its sources aren't a cache's, a position's, a sequence's and its reach's"
         sequenceSource k kl slot
-        positions kl slot pos
+        mapM_ (positions kl slot) (pos : reach)
         expect (kl == vl) "its key and value caches are laid out differently"
         expect (a.attnHeads > 0) "it has no query heads"
         expect (a.attnKvHeads > 0 && a.attnHeads `mod` a.attnKvHeads == 0) "its query heads don't share its key and value heads evenly"
@@ -322,7 +324,7 @@ shapes p = reverse (execState (mapM_ node p.programNodes >> outputs) (St Map.emp
         expect (q.valueShape == Shape (a.attnHeads * a.attnHeadDim) a.attnHeadDim) "its queries aren't its heads"
         expect (maybe True (> 0) a.attnWindow) "its window is empty"
         expect (a.attnScale > 0 && finite a.attnScale) "its scale isn't positive and finite"
-        ringFit k kl a pos
+        ringFit k kl a pos reach
         shaped o q.valueShape TF32
       _ -> expect False "it reads keys or values from something that isn't a cache"
     (Gather _ _ factor, [], [t, tok], [o]) -> case weight2 t of
@@ -357,14 +359,28 @@ shapes p = reverse (execState (mapM_ node p.programNodes >> outputs) (St Map.emp
       | otherwise = pure ()
     {- A ring holds a sequence's last positions, as many as its length:
     attention over one reads no more of them at once than that. A row
-    reads from its window's start, or the sequence's, to its own
-    position. -}
-    ringFit c layout a pos = case layout of
-      Ring _ _ len _ -> case a.attnWindow of
-        Just w -> within (w <= len) ("its window of " <> showT w <> " positions is longer than the " <> showT len <> " that " <> c.sourceName <> "'s ring holds")
-        Nothing -> case pos.sourceKind of
-          SRowInts _ b ->
-            within (b <= len) ("with no window it reads every position below the bound of " <> pos.sourceName <> ", " <> showT b <> ", more than the " <> showT len <> " that " <> c.sourceName <> "'s ring holds")
+    reads from its window's start, or the sequence's, to its reach: at
+    most its ahead past its own position, and below its bound. -}
+    ringFit c layout a pos reach = case layout of
+      Ring _ _ len _ -> do
+        let holds = ", more than the " <> showT len <> " that " <> c.sourceName <> "'s ring holds"
+            boundOf s = case s.sourceKind of
+              SRowInts _ b -> Just b
+              _ -> Nothing
+        case (a.attnWindow, a.attnReach, reach) of
+          (Just w, Nothing, _) ->
+            within (w <= len) ("its window of " <> showT w <> " positions is longer than the " <> showT len <> " that " <> c.sourceName <> "'s ring holds")
+          (Just w, Just r, [rs]) | Just rb <- boundOf rs -> do
+            let spanned = min (w + r.reachAhead) (max w rb)
+            within (spanned <= len) ("its window of " <> showT w <> " and its reach of up to " <> showT r.reachAhead <> " past a row's own position read " <> showT spanned <> " positions" <> holds)
+          (Nothing, Nothing, _)
+            | Just b <- boundOf pos ->
+                within (b <= len) ("with no window it reads every position below the bound of " <> pos.sourceName <> ", " <> showT b <> holds)
+          (Nothing, Just r, [rs])
+            | Just b <- boundOf pos
+            , Just rb <- boundOf rs -> do
+                let below = max b (min (b + r.reachAhead) rb)
+                within (below <= len) ("with no window, and a reach of up to " <> showT r.reachAhead <> " past a row's own position, it reads every position below " <> showT below <> holds)
           -- Sources of other kinds have their findings.
           _ -> pure ()
       Paged {} -> pure ()

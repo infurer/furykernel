@@ -312,7 +312,8 @@ nix fmt && git diff --exit-code &&
     reading no more positions than it holds). `.Eval` gives them
     their meaning in f64, rounding only where a cache stores bf16, a
     step's rows storing and attending in row order, as if one at a time
-    (so a ring shorter than a step still gives each row its keys)
+    (so a ring shorter than a step still gives each row its keys; a row
+    reaching past its position reads as the row that stored its reach)
     (`evaluateStored`: over what kernels stored, the caches as they left
     them and the rows they staged, each store checked against its
     value's bound). Every value carries a bound, how far a kernel's
