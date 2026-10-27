@@ -24,6 +24,7 @@ module FuryKernel.Program.Build (
   input,
   rowInts,
   weight,
+  rowsF32,
   table,
   cache,
 
@@ -172,6 +173,12 @@ first, anything else @row_major@.
 weight :: Name -> [Natural] -> P Src
 weight name dims = addSource name (SWeight dims TBF16 (if length dims == 2 then "out_in" else "row_major"))
 
+{- | f32 rows another program wrote, @[rows, width]@ row-major: a table
+that a gather reads, the pooling of a vision encoder's patches.
+-}
+rowsF32 :: Name -> [Natural] -> P Src
+rowsF32 name dims = addSource name (SWeight dims TF32 "row_major")
+
 -- | A table of @n@ bf16 weights in the @out_in@ layout, each of this shape.
 table :: Name -> Natural -> [Natural] -> P Src
 table name n dims = addSource name (STable n dims TBF16 "out_in")
@@ -251,7 +258,9 @@ kvStore name at x = void $ addNode name (KvStore ((.srcId) <$> at) x.valId) []
 attend :: Name -> AttnSpec -> Val -> AttendTo Src -> P Val
 attend name spec q to = one name (Attend spec q.valId ((.srcId) <$> to)) q.valShape TF32
 
--- | Each row's token's row of the table, times @factor@.
+{- | Per row, the sum of the table's rows its tokens name (as many as
+@tok@ has a row), times @factor@.
+-}
 gather :: Name -> Src -> Src -> Double -> P Val
 gather name t tok f = one name (Gather t.srcId tok.srcId f) (wholeRow width) TF32
  where

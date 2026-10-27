@@ -321,6 +321,8 @@ tests =
         let cachesOf rows = [s.stepCaches | s <- (plan defaultPlanOptions {optSequenceRows = rows} (checked ringProgram)).planSteps, s.stepName == "s2_combine"]
         cachesOf 3 @?= [[]]
         fmap length (cachesOf 4) @?= [2]
+    , testCase "what recomputing an operation costs: a gather that sums rows, more than its kind" $
+        [nodeCost pooled n.nodeOp | n <- pooled.programNodes, Gather {} <- [n.nodeOp]] @?= [Expensive]
     , testCase "PlanCheck refuses a staged store landing with its attention, and stores first or staged against the ring's room" $ do
         let opts = defaultPlanOptions {optSequenceRows = 4}
             pl = plan opts (checked ringProgram)
@@ -450,8 +452,12 @@ tests =
     , testCase "the gate refuses to concatenate segments of other widths" $
         assertBool "a concatenation of other segments passed" (isLeft (checkProgram badConcat))
     , testCase "the evaluator: a rotary embedding of two axes turns each half of a head by its own position" evalAxialRope
+    , testCase "the evaluator: a gather of several rows sums them, times its factor" evalPooledGather
     , testCase "the gate refuses a rotary embedding of two axes over one position" $
         assertBool "two axes over one position passed" (isLeft (checkProgram (axialRope 1)))
+    , testCase "the planner stores a gather of several rows before the linear layer that reads it" $
+        fmap (map (.stepName) . (.planSteps) . plan defaultPlanOptions) (checkProgram pooled)
+          @?= Right ["s0_pooled", "s1_gemv"]
     , testProperty "bf16 rounding of a double agrees with narrowing a float" roundingAgrees
     ]
 
@@ -652,6 +658,7 @@ planned =
   , attnKept
   , predicting
   , ringProgram
+  , pooled
   ]
 
 isStaging, isLand :: Work -> Bool
@@ -1516,6 +1523,30 @@ evalAxialRope = do
   case fmap (Map.lookup "turned" . (.evalOutputs)) (evaluate (checked (axialRope 2)) b) of
     Right (Just rows) -> assertBool (show rows) (and (zipWith (\r e -> maximum (zipWith (\u v -> abs (u - v)) r e) < 1e-12) rows expected))
     other -> assertFailure (show other)
+
+-- | Three rows of a table of 6, summed and divided by 3, then a linear layer.
+pooled :: Program
+pooled = program "pooled" $ do
+  t <- weight "table" [6, 4]
+  tok <- rowInts "rows" 3 6
+  w <- weight "w" [2, 4]
+  rows <- gather "pooled" t tok (1 / 3)
+  out <- linear "out" w 0 rows
+  output "out" out
+
+evalPooledGather :: IO ()
+evalPooledGather = do
+  let p = program "summed" $ do
+        t <- weight "table" [4, 2]
+        tok <- rowInts "rows" 2 4
+        rows <- gather "summed" t tok 0.5
+        output "summed" rows
+      b =
+        (bindings 2)
+          { bindWeights = Map.fromList [("table", [1, 2, 3, 4, 5, 6, 7, 8])]
+          , bindRowInts = Map.fromList [("rows", [[0, 1], [2, 3]])]
+          }
+  fmap (Map.lookup "summed" . (.evalOutputs)) (evaluate (checked p) b) @?= Right (Just [[2, 3], [6, 7]])
 
 roundingAgrees :: Property
 roundingAgrees = property $ do

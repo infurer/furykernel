@@ -207,14 +207,19 @@ data Cost
     Expensive
   deriving stock (Eq, Ord, Show)
 
-{- | What recomputing an operation of the program costs a threadgroup, as
-the planner counts it.
+{- | What recomputing an operation of the program costs a threadgroup: what
+its kind costs, and more where its sources say so (a gather that sums
+rows, which an anchor would repeat for every output it makes).
 -}
 nodeCost :: Program -> Op -> Cost
-nodeCost _ = \case
+nodeCost p = \case
   RmsNorm {} -> Pass
   Route {} -> Pass
   ArgMax {} -> Pass
+  Gather _ tok _
+    | Just Source {sourceKind = SRowInts k _} <- programSource p tok
+    , k > 1 ->
+        Expensive
   _ -> Cheap
 
 -- | Whether an operation reads a tiled value elementwise.

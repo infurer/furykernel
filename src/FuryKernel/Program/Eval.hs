@@ -509,12 +509,12 @@ evaluateWith kept checked b = do
       put o (map (arr . fst) rowsOut) (map (arr . snd) rowsOut)
     (Gather t tok f, [o]) -> do
       wa <- weightOf t
-      toks <- int1 tok
+      toks <- intRows tok
       let width = size (shapeOf o)
       put
         o
-        [listArray (0, width - 1) [wa ! (token * width + j) * f | j <- [0 .. width - 1]] | token <- toks]
-        [boundsArr [gatherA [wa ! (token * width + j)] f | j <- [0 .. width - 1]] | token <- toks]
+        [listArray (0, width - 1) [sum [wa ! (token * width + j) | token <- tokens] * f | j <- [0 .. width - 1]] | tokens <- toks]
+        [boundsArr [gatherA [wa ! (token * width + j) | token <- tokens] f | j <- [0 .. width - 1]] | tokens <- toks]
     (ArgMax x, [o]) -> do
       xs <- valueOf env x
       as <- approxOf env x

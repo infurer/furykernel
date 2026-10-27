@@ -328,7 +328,7 @@ shapes p = reverse (execState (mapM_ node p.programNodes >> outputs) (St Map.emp
     (Gather _ _ factor, [], [t, tok], [o]) -> case weight2 t of
       Just (rows, cols) -> do
         expect (finite factor) "its factor isn't finite"
-        rowInts1 tok
+        expect (isRowInts tok.sourceKind) (tok.sourceName <> " is not u32 per row")
         bounded tok rows ("the " <> showT rows <> " rows of " <> t.sourceName)
         shaped o (wholeRow cols) TF32
       Nothing -> expect False (t.sourceName <> " is not a two-dimensional weight")

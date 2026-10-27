@@ -314,7 +314,9 @@ data Op
     sequence's keys and values in the caches, as of the row's position.
     -}
     Attend AttnSpec ValueId (AttendTo SourceId)
-  | -- | Each row's token's row of the table, times a constant factor.
+  | {- | Per row, the sum of the table's rows its tokens name (one, for an
+    embedding; more, for a pooled set of rows), times a constant factor.
+    -}
     Gather SourceId SourceId Double
   | -- | The index of the row's largest element, ties to the lowest.
     ArgMax ValueId

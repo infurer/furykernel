@@ -342,7 +342,9 @@ nix fmt && git diff --exit-code &&
     and makes the outputs that need nothing more) and the outputs no
     anchor computes. Asked to
     (`optStoreGelus`), a plan stores a GELU an anchor reads first, by a
-    light step. A store into
+    light step, and a gather that sums rows, too dear to recompute for
+    every output (`nodeCost`), is stored before an anchor reads it. A
+    store into
     a ring without room for a step's rows of one sequence
     (`optSequenceRows`) past the positions a row reads is staged: a light
     step keeps its values, the attention reads the step's own positions
