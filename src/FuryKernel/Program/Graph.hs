@@ -277,6 +277,10 @@ data Op
     -}
     RmsNorm Double (Maybe SourceId) Double ValueId
   | Add ValueId ValueId
+  | {- | Each row's first value, then its second: their segments, which are
+    as wide, in that order.
+    -}
+    Concat ValueId ValueId
   | -- | Times a weight of one element.
     ScaleBy SourceId ValueId
   | {- | Per segment, @gelu(a) · b@ of its halves @a@ and @b@, the GELU of
@@ -319,6 +323,7 @@ opValues = \case
   LinearRouted _ ids x -> [ids, x]
   RmsNorm _ _ _ x -> [x]
   Add a b -> [a, b]
+  Concat a b -> [a, b]
   ScaleBy _ x -> [x]
   GatedGelu _ x -> [x]
   GeluMul _ a b -> [a, b]
@@ -339,6 +344,7 @@ opSources = \case
   LinearRouted t _ _ -> [t]
   RmsNorm _ g _ _ -> maybe [] pure g
   Add {} -> []
+  Concat {} -> []
   ScaleBy w _ -> [w]
   GatedGelu {} -> []
   GeluMul {} -> []
@@ -430,6 +436,7 @@ renderProgram p =
     RmsNorm eps g f x ->
       "rmsnorm(" <> value x <> ", eps " <> double eps <> maybe "" ((", gamma " <>) . src) g <> ", factor " <> double f <> ")"
     Add a b -> "add(" <> value a <> ", " <> value b <> ")"
+    Concat a b -> "concat(" <> value a <> ", " <> value b <> ")"
     ScaleBy w x -> "scale_by(" <> src w <> ", " <> value x <> ")"
     GatedGelu GeluTanh x -> "gated_gelu(" <> value x <> ")"
     GeluMul GeluTanh a b -> "gelu_mul(" <> value a <> ", " <> value b <> ")"

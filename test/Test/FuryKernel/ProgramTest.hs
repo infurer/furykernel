@@ -13,7 +13,7 @@ module Test.FuryKernel.ProgramTest (
 import Control.Exception qualified as E
 import Control.Monad (foldM, void, when)
 import Data.Char (isDigit)
-import Data.Either (fromLeft, isRight)
+import Data.Either (fromLeft, isLeft, isRight)
 import Data.List (unzip4, zip4)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
@@ -439,6 +439,9 @@ tests =
     , testCase "the evaluator, given what kernels staged: each row's staged values read, the cache holding the last" evalStaged
     , testCase "the evaluator: routes take the top k, ties to the lower index" evalRoute
     , testCase "the evaluator binds caches sparsely: two blocks of a paged pool of 2^33 elements, one slot of a ring" evalSparse
+    , testCase "the evaluator: a concatenation's row, the first's then the second's" evalConcat
+    , testCase "the gate refuses to concatenate segments of other widths" $
+        assertBool "a concatenation of other segments passed" (isLeft (checkProgram badConcat))
     , testProperty "bf16 rounding of a double agrees with narrowing a float" roundingAgrees
     ]
 
@@ -1449,6 +1452,32 @@ evalRoute = do
       b = (bindings 1) {bindInputs = Map.fromList [("x", [[1, 3, 3, 2]])]}
   fmap (\e -> (Map.lookup "ids" e.evalOutputs, Map.lookup "ws" e.evalOutputs)) (evaluate (checked p) b)
     @?= Right (Just [[1, 2]], Just [[0.5, 0.5]])
+
+evalConcat :: IO ()
+evalConcat = do
+  let p = program "joined" $ do
+        x <- input "x" (wholeRow 2) TF32
+        y <- input "y" (wholeRow 2) TF32
+        w <- weight "w" [1, 4]
+        joined <- concatenate "joined" x y
+        z <- linear "z" w 0 joined
+        output "joined" joined
+        output "z" z
+      b =
+        (bindings 2)
+          { bindInputs = Map.fromList [("x", [[1, 2], [3, 4]]), ("y", [[5, 6], [7, 8]])]
+          , bindWeights = Map.fromList [("w", [1, 10, 100, 1000])]
+          }
+  fmap (\e -> (Map.lookup "joined" e.evalOutputs, Map.lookup "z" e.evalOutputs)) (evaluate (checked p) b)
+    @?= Right (Just [[1, 2, 5, 6], [3, 4, 7, 8]], Just [[6521], [8743]])
+
+-- | Rows of one segment of 2 and of two segments of 1, concatenated.
+badConcat :: Program
+badConcat = program "mismatched" $ do
+  x <- input "x" (wholeRow 2) TF32
+  y <- input "y" (Shape 2 1) TF32
+  joined <- concatenate "joined" x y
+  output "joined" joined
 
 roundingAgrees :: Property
 roundingAgrees = property $ do

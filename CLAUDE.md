@@ -267,7 +267,8 @@ nix fmt && git diff --exit-code &&
     expert's ranks), made by a small vocabulary of operations (linear
     layers, plain or routed through a table of weights; RMSNorm; rotary
     embeddings; routing; stores into KV caches and attention over them,
-    ring or paged; gathers; elementwise work) from sources: per-row
+    ring or paged; gathers; elementwise work; concatenations of rows)
+    from sources: per-row
     activations and integers (each below a bound), weights, tables,
     caches. A store names its cache and its rows' positions and sequences,
     and an attention its keys, values, positions and sequences, by field

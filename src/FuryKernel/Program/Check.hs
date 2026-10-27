@@ -256,6 +256,11 @@ shapes p = reverse (execState (mapM_ node p.programNodes >> outputs) (St Map.emp
       f32 b
       expect (a.valueShape == b.valueShape) "its operands have different shapes"
       shaped o a.valueShape TF32
+    (Concat _ _, [a, b], [], [o]) -> do
+      f32 a
+      f32 b
+      expect (a.valueShape.shapeSegment == b.valueShape.shapeSegment) "its operands' segments differ"
+      shaped o (Shape (a.valueShape.shapeWidth + b.valueShape.shapeWidth) a.valueShape.shapeSegment) TF32
     (ScaleBy _ _, [x], [w], [o]) -> do
       f32 x
       expect (weight1 w == Just 1) (w.sourceName <> " is not a weight of one element")

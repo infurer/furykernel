@@ -32,6 +32,7 @@ module FuryKernel.Program.Build (
   linearRouted,
   rmsnorm,
   add,
+  concatenate,
   scaleBy,
   gatedGelu,
   geluMul,
@@ -208,6 +209,10 @@ rmsnorm name eps g f x = one name (RmsNorm eps (fmap (.srcId) g) f x.valId) x.va
 
 add :: Name -> Val -> Val -> P Val
 add name a b = one name (Add a.valId b.valId) a.valShape TF32
+
+-- | Each row's @a@, then its @b@, whose segments are as wide.
+concatenate :: Name -> Val -> Val -> P Val
+concatenate name a b = one name (Concat a.valId b.valId) (Shape (a.valShape.shapeWidth + b.valShape.shapeWidth) a.valShape.shapeSegment) TF32
 
 -- | Times a weight of one element.
 scaleBy :: Name -> Src -> Val -> P Val

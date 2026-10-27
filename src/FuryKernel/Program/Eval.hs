@@ -330,6 +330,12 @@ evaluateWith kept checked b = do
         o
         [arr (zipWith (+) (elemsOf x) (elemsOf y)) | (x, y) <- zip as cs]
         [boundsArr (zipWith (\u v -> sumA [u, v]) x y) | (x, y) <- zip aas cas]
+    (Concat a c, [o]) -> do
+      as <- valueOf env a
+      cs <- valueOf env c
+      ab <- boundsOf env a
+      cb <- boundsOf env c
+      put o [arr (elemsOf x <> elemsOf y) | (x, y) <- zip as cs] [arr (elemsOf x <> elemsOf y) | (x, y) <- zip ab cb]
     (ScaleBy w x, [o]) -> do
       wa <- weightOf w
       xs <- valueOf env x
