@@ -134,6 +134,7 @@ module FuryKernel.Build (
   fragLoadTg,
   fragLoadTgT,
   fragMma,
+  fragConvert,
   fragStore,
   fragStoreTg,
   whenU,
@@ -1043,6 +1044,13 @@ fragLoadTgT (Frag n) (TgArr a) (Exp i) (Exp st) = K (emit (IR.SFragLoad n (IR.FT
 -- | @d = a · b + c@: @d@ may be @c@, accumulating.
 fragMma :: (Converged r, FragInput a) => Frag Float -> Frag a -> Frag a -> Frag Float -> K r ()
 fragMma (Frag d) (Frag a) (Frag b) (Frag c) = K (emit (IR.SFragMma d a b c))
+
+{- | @fragConvert d s@: the elements of @s@ widened into the f32 fragment
+@d@, element by element, wherever a target keeps them in its lanes: a
+fragment of bf16 or f16 loaded as it is stored, multiplied in f32.
+-}
+fragConvert :: (Converged r) => Frag Float -> Frag a -> K r ()
+fragConvert (Frag d) (Frag s) = K (emit (IR.SFragConvert d s))
 
 -- | Stores a fragment to a buffer: its element @(r, c)@ at @index + r * stride + c@.
 fragStore :: (Converged r, Writable acc) => Buf t acc align a -> Exp Word32 -> Exp Word32 -> Frag a -> K r ()

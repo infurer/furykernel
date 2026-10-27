@@ -127,7 +127,8 @@ nix fmt && git diff --exit-code &&
     table, `loadVia` and `loadPackVia` read through one. Fragments are the
     8×8 matrices a SIMD group holds together (`fragment`): loaded from
     device or threadgroup memory, plain or transposed (`fragLoad`,
-    `fragLoadT`, `fragLoadTg`, `fragLoadTgT`), multiplied into f32
+    `fragLoadT`, `fragLoadTg`, `fragLoadTgT`), widened into f32 ones
+    element by element (`fragConvert`), multiplied into f32
     accumulators (`fragMma`) and stored; every lane takes part
     (`Converged`).
   - `FuryKernel.Check`: the gate. `check` returns a `Checked` kernel, whose

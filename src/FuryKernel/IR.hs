@@ -334,6 +334,8 @@ data Stmt
     the result may be @c@.
     -}
     SFragMma Name Name Name Name
+  | -- | Destination, source: a fragment's elements widened into an f32 fragment.
+    SFragConvert Name Name
   | -- | A fragment stored, element @(r, c)@ at @index + r * stride + c@.
     SFragStore FragMemory Expr Expr Name
   deriving stock (Eq, Show)
@@ -566,6 +568,7 @@ stmt depth = \case
   SFragLoad n m i st tr ->
     [pad <> n <> " = " <> memory m <> ".fragment" <> (if tr then "_t" else "") <> "[" <> renderExpr i <> ", stride " <> renderExpr st <> "]"]
   SFragMma d a b c -> [pad <> d <> " = " <> a <> " * " <> b <> " + " <> c]
+  SFragConvert d s -> [pad <> d <> " = f32(" <> s <> ")"]
   SFragStore m i st n ->
     [pad <> memory m <> ".fragment[" <> renderExpr i <> ", stride " <> renderExpr st <> "] = " <> n]
  where

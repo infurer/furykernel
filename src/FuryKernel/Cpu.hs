@@ -523,6 +523,8 @@ stmt depth = \case
       , "    }"
       , "}"
       ]
+  -- Fragments are kept as f32 here: widening is a copy.
+  SFragConvert d s -> pure (simdGroups [rustIdent d <> "[fk_simd] = " <> rustIdent s <> "[fk_simd];"])
   SFragMma d a b c ->
     pure . simdGroups $
       [ "let mut fk_out = [0.0f32; 64];"

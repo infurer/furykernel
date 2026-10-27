@@ -383,6 +383,12 @@ stmt env grp active s = unless (null active) $ case s of
     forM_ [(r, c) | r <- [0 .. 7], c <- [0 .. 7]] $ \(r, c) -> do
       v <- lift (readArray arr (g * 64 + fromIntegral (r * 8 + c)))
       fragMemoryWrite m (base + r * stride + c) v
+  SFragConvert d src -> simdGroups d $ \g _ -> do
+    fs <- fragment src
+    fd <- fragment d
+    forM_ [0 .. 63] $ \e -> do
+      v <- lift (readArray fs (g * 64 + e)) >>= convert TF32
+      lift (writeArray fd (g * 64 + e) $! v)
   SFragMma d a b c -> simdGroups d $ \g _ -> do
     fa <- fragment a
     fb <- fragment b

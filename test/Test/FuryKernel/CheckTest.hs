@@ -195,6 +195,11 @@ tests =
         map (.findingRule) (tg [STgStorePack "t" (lu 0) (map f32 [1 .. 8])]) @?= [Packs, Packs]
         map (.findingMessage) (tg [STgStorePack "t" (lu 0) [f32 1, ELit (LU32 2)], STgStorePack "u" (lu 0) [f32 1, f32 2]])
           @?= ["A value stored to t is u32, not f32.", "No threadgroup array u."]
+    , testCase "fragments widen only into f32" $
+        map
+          (.findingMessage)
+          (findings [SFragVar "f" TF32, SFragVar "h" TBF16, SFragConvert "f" "h", SFragConvert "h" "f"])
+          @?= ["The fragment h converted into is not of f32."]
     , testCase "packs: of no elements, asked no alignment" $ do
         let src = Buffer "src" ReadOnly TF32 16 (ELit (LU32 64))
         [f.findingMessage | f <- checkIR (targetCaps @T32) (base [SLoadPack [] TF32 "src" (lu 0)]) {kernelBuffers = [src]}, f.findingRule == Packs]

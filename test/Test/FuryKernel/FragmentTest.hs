@@ -37,6 +37,7 @@ tests =
         agrees (gemm @Float) VF32 (\case VF32 x -> x; _ -> 0 / 0)
     , testCase "of fragments loaded from threadgroup memory, transposed" $
         agrees (staged @BF16) (VBF16 . narrowBF16) (\case VBF16 b -> widenBF16 b; _ -> 0 / 0)
+    , testCase "of f32 fragments by bf16 ones widened as loaded, element by element" mixedAgrees
     , testCase "a target without fragments takes none" $
         case check (gemm @BF16 @T16) of
           Left fs -> assertBool (show fs) (any ((== Fragments) . (.findingRule)) fs)
@@ -98,6 +99,46 @@ staged = kernel "staged" $ do
         fragMma acc fa fb acc
         barrier
       fragStore c (row0 * 16 + col0) 16 acc
+
+{- | 'gemm' of an f32 A by a bf16 B, B's tiles loaded as bf16 fragments and
+widened into f32 ones before they multiply.
+-}
+mixed :: Kernel T32
+mixed = kernel "mixed" $ do
+  k <- dim "k" (DimRange 8 256 8)
+  a <- buffer @ReadOnly @16 @Float "a" (16 * k)
+  b <- buffer @ReadOnly @16 @BF16 "b" (16 * k)
+  c <- buffer @WriteOnly @16 @Float "c" 256
+  threads @128
+  groups 1
+  pure . pure $ do
+    row0 <- let_ "row0" ((simdGroupIndex `quotE` 2) * 8)
+    col0 <- let_ "col0" ((simdGroupIndex `remE` 2) * 8)
+    acc <- fragment @Float "acc"
+    fa <- fragment @Float "fa"
+    fbh <- fragment @BF16 "fbh"
+    fb <- fragment @Float "fb"
+    forU "p" 0 (k `quotE` 8) $ \p -> do
+      fragLoad fa a (row0 * k + p * 8) k
+      fragLoadT fbh b (col0 * k + p * 8) k
+      fragConvert fb fbh
+      fragMma acc fa fb acc
+    fragStore c (row0 * 16 + col0) 16 acc
+
+mixedAgrees :: IO ()
+mixedAgrees = do
+  let k = 64 :: Int
+      noise :: Int -> Int -> Float
+      noise s i = fromIntegral ((s * 7919 + i * 104729) `mod` 2001 - 1000) / 1000
+      as = [noise 1 i | i <- [0 .. 16 * k - 1]]
+      bs = [widenBF16 (narrowBF16 (noise 2 i)) | i <- [0 .. 16 * k - 1]]
+      exact i j = sum [float2Double (as !! (i * k + p)) * float2Double (bs !! (j * k + p)) | p <- [0 .. k - 1]]
+  case runOn mixed [("k", VU32 (fromIntegral k :: Word32))] [("a", map VF32 as), ("b", map (VBF16 . narrowBF16) bs), ("c", replicate 256 (VF32 0))] 0 of
+    Left e -> assertFailure (show e)
+    Right out -> do
+      let cs = Map.findWithDefault [] "c" out
+          diffs = [abs (output v - exact i j) | (n, v) <- zip [0 :: Int ..] cs, let (i, j) = n `divMod` 16]
+      assertBool ("the differences are " <> describe diffs) (length cs == 256 && within 1e-4 diffs)
 
 -- | A kernel on T32 against f64, inputs made of @value@ and read back with @widenV@.
 agrees :: Kernel T32 -> (Float -> Value) -> (Value -> Float) -> IO ()

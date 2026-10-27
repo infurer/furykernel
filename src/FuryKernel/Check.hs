@@ -436,6 +436,10 @@ checkTyping k =
       index ("the stride of the fragment store of " <> n) st
       t <- fragmentType n
       element ("The fragment " <> n <> " stored to") m t False
+    SFragConvert d s -> do
+      td <- fragmentType d
+      _ <- fragmentType s
+      unless (td == Just TF32) $ bad ("The fragment " <> d <> " converted into is not of f32.")
     SFragMma d a b c -> do
       td <- fragmentType d
       ta <- fragmentType a
@@ -606,6 +610,7 @@ checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
     SFragLoad n _ i st _ -> fragment n [i, st]
     SFragStore _ i st n -> fragment n [i, st]
     SFragMma d _ _ _ -> fragment d []
+    SFragConvert d _ -> fragment d []
     _ -> pure ()
    where
     uni = uniIn stored
