@@ -120,6 +120,7 @@ module FuryKernel.Build (
   tgLoad,
   tgStore,
   tgStorePack,
+  simdBarrier,
   barrier,
   simdSum,
   simdMax,
@@ -881,6 +882,12 @@ tgStorePack (TgArr n) (Exp j) es = K (emit (IR.STgStorePack n j (map expIR es)))
 -- | Every thread of the threadgroup waits here, so only in 'Uniform' code.
 barrier :: (AllThreads r) => K r ()
 barrier = K (emit IR.SBarrier)
+
+{- | Every lane of the SIMD group waits here, and sees the threadgroup
+memory its lanes stored before: so only where every lane is ('Converged').
+-}
+simdBarrier :: (Converged r) => K r ()
+simdBarrier = K (emit IR.SSimdBarrier)
 
 -- | Regions every thread of the threadgroup reaches.
 type AllThreads :: Region -> Constraint

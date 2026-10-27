@@ -154,11 +154,11 @@ tests =
         map
           (.findingRule)
           ( findings
-              [ SIf RDivergent (u32 SimdLane .==. lu 0) [SBarrier, SSimd "s" SimdSum TF32 (f32 1)] []
-              , SIf RSimdUniform (u32 SimdGroup .==. lu 0) [SBarrier] []
+              [ SIf RDivergent (u32 SimdLane .==. lu 0) [SBarrier, SSimd "s" SimdSum TF32 (f32 1), SSimdBarrier] []
+              , SIf RSimdUniform (u32 SimdGroup .==. lu 0) [SBarrier, SSimdBarrier] []
               ]
           )
-          @?= [Regions, Regions, Regions]
+          @?= [Regions, Regions, Regions, Regions]
     , testCase "typing" $
         map
           (.findingMessage)

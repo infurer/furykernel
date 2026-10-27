@@ -344,6 +344,14 @@ stmt env grp active s = unless (null active) $ case s of
     go 0 active
   SBarrier ->
     unless (active == allLanes env.envKernel) $ throwE DivergentBarrier
+  SSimdBarrier -> do
+    let w = fromIntegral env.envCaps.capSimdWidth
+        threads = fromIntegral env.envKernel.kernelThreads
+        groupsOf = [[g * w .. min threads ((g + 1) * w) - 1] | g <- [0 .. (threads + w - 1) `div` w - 1]]
+        activeSet = IntSet.fromList active
+    forM_ groupsOf $ \lanes -> do
+      let present = filter (`IntSet.member` activeSet) lanes
+      unless (null present || present == lanes) $ throwE (DivergentSimd "simdgroup barrier")
   SSimd n op _ e -> do
     let w = fromIntegral env.envCaps.capSimdWidth
         threads = fromIntegral env.envKernel.kernelThreads

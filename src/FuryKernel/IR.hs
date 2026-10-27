@@ -315,6 +315,8 @@ data Stmt
     SFor Region Name Expr Expr Expr [Stmt]
   | -- | A threadgroup barrier over threadgroup memory.
     SBarrier
+  | -- | A SIMD-group barrier over threadgroup memory: its lanes see each other's stores.
+    SSimdBarrier
   | -- | A local bound to a SIMD-group reduction of the given type.
     SSimd Name SimdOp ScalarType Expr
   | {- | A fragment: an 8×8 matrix of the given element type that a SIMD
@@ -558,6 +560,7 @@ stmt depth = \case
       <> concatMap (stmt (depth + 1)) body
       <> [pad <> "}"]
   SBarrier -> [pad <> "barrier"]
+  SSimdBarrier -> [pad <> "simd barrier"]
   SSimd n op t e -> [pad <> "let " <> n <> " : " <> scalarTypeName t <> " = " <> simdOp op <> "(" <> renderExpr e <> ")"]
   SFragVar n t -> [pad <> "fragment " <> n <> " : " <> scalarTypeName t <> "[8x8] = 0"]
   SFragLoad n m i st tr ->

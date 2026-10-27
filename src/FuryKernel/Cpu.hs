@@ -457,6 +457,7 @@ stmt depth = \case
            , pad <> "}"
            ]
   SBarrier -> pure [pad <> "// A barrier: the lanes run in step."]
+  SSimdBarrier -> pure [pad <> "// A SIMD-group barrier: the lanes run in step."]
   SSimd n op t e -> do
     e' <- ex e
     declare n t

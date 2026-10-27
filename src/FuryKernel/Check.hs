@@ -418,6 +418,7 @@ checkTyping k =
       when (step == ELit (LU32 0)) $ bad ("The loop " <> v <> " steps by 0, so it never ends.")
       within (forPlace v) (scoped (declare v (Local TU32 False False) >> traverse_ stmt body))
     SBarrier -> pure ()
+    SSimdBarrier -> pure ()
     SSimd n _ t e -> do
       unless (t `elem` [TF32, TF16, TI32, TU32]) $ bad ("No SIMD-group reduction of " <> scalarTypeName t <> ".")
       expect ("The operand of " <> n) t e
@@ -598,6 +599,9 @@ checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
     SSimd n _ _ _ ->
       when (r == D) $
         report place Regions ("The SIMD-group operation " <> n <> " where not every lane of the group is active.")
+    SSimdBarrier ->
+      when (r == D) $
+        report place Regions "A SIMD-group barrier where not every lane of the group arrives."
     SFragVar n _ -> fragment n []
     SFragLoad n _ i st _ -> fragment n [i, st]
     SFragStore _ i st n -> fragment n [i, st]

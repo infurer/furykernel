@@ -114,7 +114,8 @@ nix fmt && git diff --exit-code &&
     Storage types have no `Num` and integers no `FloatScalar`; `fmaE`
     multiplies and adds with one rounding, the only fusion targets do;
     barriers need every thread
-    (`AllThreads`), SIMD-group operations every lane (`Converged`), loads
+    (`AllThreads`), SIMD-group operations and barriers (`simdBarrier`)
+    every lane (`Converged`), loads
     and stores the right access; each refusal has its own message.
     Locals are named by the author (`let_`, `var`) and stay named.
     Buffers carry their target, for the pack rule: `loadPack` and
