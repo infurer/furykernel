@@ -445,9 +445,10 @@ nix fmt && git diff --exit-code &&
   toolchain for that check), `devshell.nix` (`checks.devshell` builds its shell) and `treefmt.nix` (`nix fmt`
   and `checks.treefmt`).
 - `.gitlab-ci.yml`: GitLab CI on x86_64-linux runners. `checks` runs
-  `nix flake check --all-systems`, which builds x86_64-linux's checks;
-  `publish-github`, on master once those passed, pushes master, and the
-  tags it holds, to the public GitHub repository.
+  `nix flake check --all-systems`, which builds x86_64-linux's checks, and
+  builds the packages of x86_64-linux and aarch64-linux, whose tests run in
+  their checkPhase; `publish-github`, on master once those passed, pushes
+  master, and the tags it holds, to the public GitHub repository.
 
 ## Conventions
 

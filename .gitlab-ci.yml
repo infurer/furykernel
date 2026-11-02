@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Mika Tammi
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# GitLab CI on x86_64-linux runners: the flake's checks, and on master a
-# push to the public GitHub repository.
+# GitLab CI on x86_64-linux runners: the flake's checks and its packages,
+# and on master a push to the public GitHub repository.
 stages:
   - ci
   - publish
@@ -13,6 +13,10 @@ checks:
   interruptible: true
   script:
     - nix flake check --all-systems --no-update-lock-file -L
+    # The packages, listed by hand: x86_64-linux's is checks.build, which
+    # the line above built; aarch64-linux's builds on its remote builder.
+    # Their tests run in checkPhase.
+    - nix build --no-link --no-update-lock-file -L .#packages.x86_64-linux.furykernel .#packages.aarch64-linux.furykernel
 # Pushes master to the public GitHub repository, in the publish stage, so
 # only after the ci stage passed: a broken master never reaches GitHub.
 #
