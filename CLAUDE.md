@@ -192,11 +192,14 @@ nix fmt && git diff --exit-code &&
     maximumNumber with -0 below +0 and two NaNs' quiet NaN, i32 and u32
     addition, subtraction and multiplication wrapping around, SIMD-group
     reductions pairwise, neighbours first, both operands of And and Or
-    and both sides of a select evaluated); the stores of a statement land in a
-    seeded order, so races show; undefined behaviour is an error: accesses
-    past what the kernel declares, however much the launch gives,
-    dimensions outside their range, integer division by zero or overflow.
-    A fragment product adds each
+    and both sides of a select evaluated); undefined behaviour is an error:
+    accesses past what the kernel declares, however much the launch gives,
+    dimensions outside their range, integer division by zero or overflow,
+    and races: every element remembers who touched it after which barriers,
+    and two threads touching one unordered, by the hazard check's rules,
+    one of them storing, stop the run (`Race`). Threadgroups run in an
+    order drawn from the seed. `runIR` runs IR the gate refused, such as
+    the hazard check's mutants. A fragment product adds each
     element's eight products to its accumulator in f32, in k order; GPUs
     may add in another, so kernels with fragments are held to f32
     accumulation's bound against the interpreter, not to its bits.
@@ -383,14 +386,16 @@ nix fmt && git diff --exit-code &&
   whatever the tile's shape and step.
   Races (`Test.FuryKernel.HazardTest`): kernels that race through
   threadgroup and device memory, fragments and SIMD groups, refused by the
-  hazard check with their messages; the library's reductions and tiles
-  pass it and fail it without their barriers, and so do passes over a
-  staged array of as many blocks as loaded, which fail it a barrier short
-  or with their store in a block; a store and a load kept apart by a value
-  per pass, a local a search finds, a branch's barrier or a minimum pass
-  it, and their near misses fail it; a buffer declared `apart` passes
-  stores at loaded places, still checked within a threadgroup.
-  The Omega test against brute force (`Test.FuryKernel.AffineTest`).
+  hazard check with their messages and stopped by the interpreter; the
+  library's reductions and tiles pass both, race without their barriers,
+  and lose no barrier whose race only the interpreter finds, and so do
+  passes over a staged array of as many blocks as loaded, which race a
+  barrier short or with their store in a block; a store and a load kept
+  apart by a value per pass, a local a search finds, a branch's barrier
+  or a minimum pass both, and race in their near misses; a buffer
+  declared `apart` passes stores at loaded places, still checked within a
+  threadgroup and at run time. The Omega test against brute force
+  (`Test.FuryKernel.AffineTest`).
   The CPU target's Rust, golden; `checks.cpu` holds it to the
   interpreter's bits and refusals (a dimension out of its range or off
   its multiple). Programs: the gate, the evaluator on small cases

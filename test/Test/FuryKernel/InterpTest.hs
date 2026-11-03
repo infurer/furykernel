@@ -13,11 +13,10 @@ import Data.Word (Word16, Word32, Word8)
 import FuryKernel.Build
 import FuryKernel.Check (check)
 import FuryKernel.Constraint (PackOk, TgArrayOk, ThreadsOk)
-import FuryKernel.Finding (Finding (..), Rule (..))
-import FuryKernel.IR (DimRange (..), Name)
+import FuryKernel.IR (BinOp (..), DimRange (..), Expr (..), Literal (..), Name, renderExpr)
 import FuryKernel.Interp
 import FuryKernel.Numerics (narrowBF16, narrowF16Double, widenBF16, widenF16)
-import FuryKernel.Target (Target)
+import FuryKernel.Target (Target, targetCaps)
 import FuryKernel.Type (BF16 (..), F16 (..))
 import GHC.Float (castFloatToWord32, castWord32ToFloat, double2Float, float2Double)
 import Hedgehog (Property, forAll, property, (===))
@@ -27,7 +26,7 @@ import Test.FuryKernel.Kernels (scale, scalePacked)
 import Test.FuryKernel.Run (runOn)
 import Test.FuryKernel.Targets (T16, T32, T64, T8)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 import Test.Tasty.Hedgehog (testProperty)
 
 tests :: TestTree
@@ -84,8 +83,10 @@ tests =
         -- The binary16 exps and log that rounding through binary32 would
         -- round twice: 0x3C08, 0x3C18 and 0xC53C.
         [gs !! (4 * 0x1F79 + 1), gs !! (4 * 0x25CF + 1), gs !! (4 * 0x1D78 + 2)] @?= [0x3C07, 0x3C17, 0xC53B]
-    , testCase "the gate refuses a race, two threads' stores to one element" $
-        either (map (.findingRule)) (const []) (check (racy @T32)) @?= [Hazards]
+    , testCase "a race is an error, two threads' stores to one element" $
+        case runIR (targetCaps @T32) (kernelIR (racy @T32)) (launch Map.empty (Map.fromList [("y", [VU32 0])])) of
+          Left (Race "y" 0 (Thread 0 a) "the store to y[0u]" (Thread 0 b) "the store to y[0u]") -> assertBool "one thread" (a /= b)
+          other -> assertFailure ("no race: " <> show other)
     , testCase "tables: elements and packs of the array an entry points at" $ do
         let arrays = [[VF32 (fromIntegral (10 * e + i)) | i <- [0 .. 3 :: Int]] | e <- [0 .. 2 :: Int]]
             launchAt entry = withTables (Map.fromList [("arrays", arrays)]) (launch (Map.fromList [("entry", VU32 entry)]) (Map.fromList [("y", replicate 6 (VF32 0))]))
@@ -101,6 +102,10 @@ tests =
           @?= Left DivideByZero
         runOn @T32 pastEnd [] [("x", replicate 4 (VF32 0)), ("y", [VF32 0])] 0
           @?= Left (OutOfBounds "x" 4 4)
+    , testCase "a launch size of IR the gate refuses leaves u32: an error, not a wrapped size" $ do
+        let sized n = runIR (targetCaps @T32) (kernelIR gridLess) (launch (Map.fromList [("n", VU32 n)]) (Map.fromList [("y", [VU32 0])]))
+        sized 0 @?= Left (LaunchSizeOutOfRange (renderExpr (EBin Sub (EParam "n") (ELit (LU32 1)))) (-1))
+        sized 3 @?= Right (Map.fromList [("y", [VU32 1])])
     , testCase "a loop whose variable stands still or wraps never ends" $ do
         let stepping start step = runOn @T32 fromBy [("start", VU32 start), ("step", VU32 step)] [("y", [VU32 0])] 0
         stepping 0 0 @?= Left (NonTermination "i")
@@ -266,6 +271,15 @@ divide = kernel "divide" $ do
   threads @32
   groups 1
   pure . pure $ whenLane (threadIndex .== 0) (store y 0 (1 `quotE` d))
+
+-- | Launched over n - 1 threadgroups, which the gate refuses at n = 0.
+gridLess :: Kernel T32
+gridLess = kernel "grid_less" $ do
+  n <- dim "n" (DimRange 0 16 1)
+  y <- buffer @WriteOnly @16 @Word32 "y" 1
+  threads @32
+  groups (n - 1)
+  pure . pure $ whenLane (threadIndex .== 0 .&& groupIndex .== 0) (store y 0 1)
 
 -- | Lane 0 counts its loop's iterations, from @start@ by @step@ to u32's greatest.
 fromBy :: forall t. (Target t, ThreadsOk t 32) => Kernel t

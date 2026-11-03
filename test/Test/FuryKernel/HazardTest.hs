@@ -2,28 +2,31 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
-{- | Races: the hazard check refuses them, with what it found; the
-library's kernels pass it, and fail it without their barriers.
+{- | Races: the hazard check refuses them, and the interpreter stops on
+them; the library's kernels pass both, and lose a barrier only where the
+interpreter, finding the race that makes, is not the only one to notice.
 -}
 module Test.FuryKernel.HazardTest (tests) where
 
-import Control.Monad (when)
+import Control.Monad (void, when)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Word (Word32)
 import FuryKernel.Build
 import FuryKernel.Check (checkIR)
 import FuryKernel.Constraint (TgArrayOk)
 import FuryKernel.Finding (Finding (..), Rule (..))
-import FuryKernel.IR (DimRange (..), Stmt (..))
+import FuryKernel.IR (DimRange (..), Name, Stmt (..))
 import FuryKernel.IR qualified as IR
+import FuryKernel.Interp
 import FuryKernel.Reduce (combineSplits, tgReduceSum)
 import FuryKernel.Target (Target, targetCaps)
 import FuryKernel.Tile (GemmTile (..), gemmTile)
-import FuryKernel.Type (BF16)
+import FuryKernel.Type (BF16 (..))
 import GHC.TypeNats (KnownNat)
 import Test.FuryKernel.Targets (T32)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (Assertion, assertBool, testCase, (@?=))
+import Test.Tasty.HUnit (Assertion, assertBool, assertFailure, testCase, (@?=))
 
 tests :: TestTree
 tests =
@@ -31,52 +34,111 @@ tests =
     "hazards"
     [ testCase "a store and another thread's load between the same barriers" $ do
         refused rawNoBarrier ["Threads may race on the threadgroup array t: the store to t[@thread] and the load of t[(63u - @thread)] can touch one element between the same barriers."]
+        raced rawNoBarrier [] [("y", zeros 64)] "t"
     , testCase "a store and another thread's load between the same barriers, the load an fma's operand" $ do
         refused fmaNoBarrier ["Threads may race on the threadgroup array t: the store to t[@thread] and the load of t[(63u - @thread)] can touch one element between the same barriers."]
+        raced fmaNoBarrier [] [("y", replicate 64 (VF32 0))] "t"
     , testCase "a loop's next stores before the loads of the last, without a barrier" $ do
         refused warNoBarrier ["Threads may race on the threadgroup array t: the store to t[@thread] and the load of t[(63u - @thread)] can touch one element between the same barriers."]
+        raced warNoBarrier [] [("x", map VU32 [0 .. 191]), ("y", zeros 192)] "t"
     , testCase "a threadgroup loads what another stores to device memory" $ do
         refused chain ["Threads may race on the buffer y: the load of y[@group] and the store to y[(@group + 1u)] can touch one element in two threads of the launch."]
+        raced chain [] [("y", zeros 5)] "y"
     , testCase "two SIMD groups store to one element, in two statements" $ do
         refused storesOfTwo ["Threads may race on the buffer y: the store to y[0u] and the store to y[0u] can touch one element in two threads of the launch."]
+        raced storesOfTwo [] [("y", zeros 1)] "y"
     , testCase "every threadgroup stores to one element" $ do
         refused storesOfAll ["Threads may race on the buffer y: the store to y[0u] in two threads can touch one element in two threads of the launch."]
+        raced storesOfAll [] [("y", zeros 1)] "y"
     , testCase "two SIMD groups store fragments to one place" $ do
         refused fragmentsOfTwo ["Threads may race on the buffer c: the fragment stored to c at 0u in two threads can touch one element in two threads of the launch."]
+        raced fragmentsOfTwo [] [("a", map VF32 [0 .. 127]), ("c", replicate 64 (VF32 0))] "c"
     , testCase "a fragment stored over itself, its rows four apart" $ do
         refused overlapping ["Threads may race on the buffer c: the fragment stored to c at 0u in two threads can touch one element in two threads of the launch."]
+        raced overlapping [] [("a", map VF32 [0 .. 63]), ("c", replicate 64 (VF32 0))] "c"
     , testCase "a barrier orders no device memory" $ do
         refused deviceAcross ["Threads may race on the buffer y: the store to y[@thread] and the load of y[(63u - @thread)] can touch one element in two threads of the launch."]
+        raced deviceAcross [] [("y", zeros 64), ("z", zeros 64)] "y"
     , testCase "lanes of a SIMD group hand values over through threadgroup memory only after a SIMD-group barrier" $ do
         refused (handOver False) ["Threads may race on the threadgroup array t: the store to t[@thread] and the load of t[((@thread + 1u) - (2u * (@thread % 2u)))] can touch one element between the same barriers."]
+        raced (handOver False) [] [("y", zeros 64)] "t"
         refused (handOver True) []
-    , testCase "a buffer declared apart: threadgroups' stores at loaded places pass" $ do
+        fmap (Map.lookup "y") (runIR (targetCaps @T32) (kernelIR (handOver True)) (launched [] [("y", zeros 64)] 0))
+          @?= Right (Just [VU32 (fromIntegral (l `xorU` 1)) | l <- [0 .. 63 :: Int]])
+    , testCase "a buffer declared apart: threadgroups' stores at loaded places pass, the launch's data keeps them apart" $ do
         refused (scatter False) ["Threads may race on the buffer y: the store to y[places[@group]] in two threads can touch one element in two threads of the launch."]
         refused (scatter True) []
+        fmap (Map.lookup "y") (runIR (targetCaps @T32) (kernelIR (scatter True)) (launched [] [("places", map VU32 [3, 0, 2, 1]), ("y", zeros 4)] 0))
+          @?= Right (Just (map VU32 [1, 3, 2, 0]))
+        raced (scatter True) [] [("places", map VU32 [3, 0, 3, 1]), ("y", zeros 4)] "y"
     , testCase "a buffer declared apart: the threads of one threadgroup are still checked" $
         refused (scatterTwice True) ["Threads may race on the buffer y: the store to y[places[@group]] and the store to y[places[@group]] can touch one element in two threads of the launch."]
-    , testCase "passes over a stage, each of blocks that load it, then a store over it, pass, and fail without their barriers" $
-        mapM_ (\loaded -> refused (staged loaded Waited) [] >> racesWithout (staged loaded Waited)) [False, True]
+    , testCase "passes over a stage, each of blocks that load it, then a store over it, pass, and race without their barriers" $
+        mapM_
+          ( \loaded -> do
+              refused (staged loaded Waited) []
+              mapM_
+                ( \seed ->
+                    fmap (Map.lookup "y") (runIR (targetCaps @T32) (kernelIR (staged loaded Waited)) (launched [] stagedBuffers seed))
+                      @?= Right (Just [VU32 (64 - i) | i <- [0 .. 63]])
+                )
+                [0 .. 7]
+              racesWithout (staged loaded Waited) [] stagedBuffers
+          )
+          [False, True]
     , testCase "passes over a stage race without the barrier after the store, without the blocks', or with the store in a block" $
-        mapM_ (\shape -> refused (staged True shape) ["Threads may race on the threadgroup array stage: the load of stage[(63u - @thread)] and the store to stage[@thread] can touch one element between the same barriers."]) [Unwaited, Unblocked, Inside]
-    , testCase "a pass's store before the next pass's load, the barriers between them only before the store" $
+        mapM_
+          ( \shape -> do
+              refused (staged True shape) ["Threads may race on the threadgroup array stage: the load of stage[(63u - @thread)] and the store to stage[@thread] can touch one element between the same barriers."]
+              raced (staged True shape) [] stagedBuffers "stage"
+          )
+          [Unwaited, Unblocked, Inside]
+    , testCase "a pass's store before the next pass's load, the barriers between them only before the store" $ do
         refused restaged ["Threads may race on the threadgroup array stage: the load of stage[(63u - @thread)] and the store to stage[@thread] can touch one element between the same barriers."]
+        raced restaged [] stagedBuffers "stage"
     , testCase "a store and a load kept apart by a value per pass, a local a search finds, a branch's barrier or a minimum pass" $
-        mapM_ (`refused` []) [turns False, searched False, branched False, clamped False]
+        mapM_
+          ( \(k, data') -> do
+              refused k []
+              mapM_ (\(bs, seed) -> void (runIR (targetCaps @T32) (kernelIR k) (launched [] bs seed)) @?= Right ()) [(bs, seed) | bs <- data', seed <- [0 .. 7]]
+          )
+          [ (turns False, [stagedBuffers, takenBuffers])
+          , (searched False, [stagedBuffers, takenBuffers])
+          , (branched False, [stagedBuffers, takenBuffers])
+          , (clamped False, [[("y", zeros 128)]])
+          ]
     , testCase "their near misses race" $ do
-        mapM_ (`refused` ["Threads may race on the threadgroup array stage: the store to stage[@thread] and the load of stage[(63u - @thread)] can touch one element between the same barriers."]) [turns True, searched True, branched True]
+        mapM_
+          ( \k -> do
+              refused k ["Threads may race on the threadgroup array stage: the store to stage[@thread] and the load of stage[(63u - @thread)] can touch one element between the same barriers."]
+              raced k [] takenBuffers "stage"
+          )
+          [turns True, searched True, branched True]
         refused (clamped True) ["Threads may race on the threadgroup array t: the store to t[((((@simd_group * 0u) + (@simd_group min 1u)) * 32u) + @lane)] in two threads can touch one element between the same barriers."]
-    , testCase "the library's reductions and tiles pass, and fail without their barriers" $ do
+        raced (clamped True) [] [("y", zeros 128)] "t"
+    , testCase "the library's reductions and tiles pass, and race without their barriers" $ do
         refused reduced []
         refused combined []
         refused tiled []
-        racesWithout reduced
-        racesWithout combined
-        racesWithout tiled
+        racesWithout reduced [] [("y", [VF32 0])]
+        racesWithout combined [] [("p", map VF32 [1 .. 8]), ("y", replicate 2 (VF32 0))]
+        racesWithout tiled tileParams tileBuffers
     , testCase "a tile's caller stores what its runs read, then a barrier: none comes before the tile's first step" $ do
         refused (stagedTile True) []
         assertBool "the hazard check passes the caller without its barrier" (any ((== Hazards) . (.findingRule)) (checkIR (targetCaps @T32) (kernelIR (stagedTile False))))
+        raced (stagedTile False) tileParams tileBuffers "a_rows"
+    , testCase "a shift by one through threadgroup memory, no barrier between its loads and stores: refused and raced" $ do
+        assertBool "the hazard check passes the shift" (any ((== Hazards) . (.findingRule)) (checkIR (targetCaps @T32) (kernelIR shifted)))
+        raced shifted [] [("y", replicate 65 (VF32 0))] "t"
+    , testCase "a barrier the interpreter finds a race without, the hazard check finds one without" $ do
+        soundWithout reduced [] [("y", [VF32 0])]
+        soundWithout combined [] [("p", map VF32 [1 .. 8]), ("y", replicate 2 (VF32 0))]
+        soundWithout tiled tileParams tileBuffers
+        soundWithout (staged False Waited) [] stagedBuffers
+        soundWithout (staged True Waited) [] stagedBuffers
     ]
+ where
+  xorU a b = if even a then a + b else a - b
 
 ------------------------------------------------------------------------------
 -- Checks
@@ -85,11 +147,30 @@ tests =
 refused :: forall t. (Target t) => Kernel t -> [Text] -> Assertion
 refused k want = [f.findingMessage | f <- checkIR (targetCaps @t) (kernelIR k), f.findingRule == Hazards] @?= want
 
--- | Without any barrier, the gate finds a race.
-racesWithout :: forall t. (Target t) => Kernel t -> Assertion
-racesWithout k = do
+launched :: [(Name, Value)] -> [(Name, [Value])] -> Word32 -> Launch
+launched ps bs seed = withSeed (fromIntegral seed) (launch (Map.fromList ps) (Map.fromList bs))
+
+-- | The interpreter stops on a race on the named memory, whatever the seed.
+raced :: forall t. (Target t) => Kernel t -> [(Name, Value)] -> [(Name, [Value])] -> Name -> Assertion
+raced k ps bs memory =
+  mapM_
+    ( \seed -> case runIR (targetCaps @t) (kernelIR k) (launched ps bs seed) of
+        Left (Race m _ a _ b _) -> do
+          m @?= memory
+          -- A fragment operation's lanes may be any of their group's.
+          assertBool "a race of one thread with itself" (a /= b || isLanes a)
+        other -> assertFailure ("no race, seed " <> show seed <> ": " <> show other)
+    )
+    [0 .. 7]
+
+-- | Without any barrier, both the gate and the interpreter find a race.
+racesWithout :: forall t. (Target t) => Kernel t -> [(Name, Value)] -> [(Name, [Value])] -> Assertion
+racesWithout k ps bs = do
   let bare = (kernelIR k) {IR.kernelBody = concatMap strip (kernelIR k).kernelBody}
   assertBool "the hazard check passes the kernel without barriers" (any ((== Hazards) . (.findingRule)) (checkIR (targetCaps @t) bare))
+  case runIR (targetCaps @t) bare (launched ps bs 0) of
+    Left Race {} -> pure ()
+    other -> assertFailure ("no race without barriers: " <> show (fmap Map.keys other))
  where
   strip = \case
     SBarrier -> []
@@ -97,6 +178,66 @@ racesWithout k = do
     SIf r c th el -> [SIf r c (concatMap strip th) (concatMap strip el)]
     SFor r v a b c body -> [SFor r v a b c (concatMap strip body)]
     s -> [s]
+
+-- | Each barrier gone: where the interpreter finds a race, the gate does.
+soundWithout :: forall t. (Target t) => Kernel t -> [(Name, Value)] -> [(Name, [Value])] -> Assertion
+soundWithout k ps bs =
+  mapM_
+    ( \i -> do
+        let mutant = (kernelIR k) {IR.kernelBody = snd (dropBarrier i 0 (kernelIR k).kernelBody)}
+            found = any ((== Hazards) . (.findingRule)) (checkIR (targetCaps @t) mutant)
+        case runIR (targetCaps @t) mutant (launched ps bs 0) of
+          Left Race {} -> assertBool ("barrier " <> show i <> " gone: the interpreter finds a race, the gate none") found
+          _ -> pure ()
+    )
+    [0 .. barriers (kernelIR k).kernelBody - 1]
+ where
+  barriers = sum . map count
+  count = \case
+    SBarrier -> 1
+    SSimdBarrier -> 1
+    SIf _ _ th el -> barriers th + barriers el
+    SFor _ _ _ _ _ body -> barriers body
+    _ -> 0 :: Int
+  -- The statements with barrier @i@ (counting from @n@) gone, and the
+  -- barriers they hold.
+  dropBarrier :: Int -> Int -> [Stmt] -> (Int, [Stmt])
+  dropBarrier _ n [] = (n, [])
+  dropBarrier i n (s : rest) =
+    let (n', s') = case s of
+          SBarrier -> (n + 1, [SBarrier | n /= i])
+          SSimdBarrier -> (n + 1, [SSimdBarrier | n /= i])
+          SIf r c th el ->
+            let (n1, th') = dropBarrier i n th
+                (n2, el') = dropBarrier i n1 el
+             in (n2, [SIf r c th' el'])
+          SFor r v a b c body -> let (n1, body') = dropBarrier i n body in (n1, [SFor r v a b c body'])
+          _ -> (n, [s])
+        (n'', rest') = dropBarrier i n' rest
+     in (n'', s' <> rest')
+
+isLanes :: Who -> Bool
+isLanes = \case
+  Lanes {} -> True
+  Thread {} -> False
+
+-- | Each thread moves its element of a threadgroup array one up, no barrier between the loads and the stores.
+shifted :: Kernel T32
+shifted = kernel "shifted" $ do
+  y <- buffer @WriteOnly @16 @Float "y" 65
+  threads @64
+  groups 1
+  pure $ do
+    t <- tgArray @65 @Float "t"
+    pure $ do
+      tgStore t threadIndex (toF32 threadIndex)
+      barrier
+      tgStore t (threadIndex + 1) (tgLoad t threadIndex)
+      barrier
+      strided "i" 65 $ \i -> store y i (tgLoad t i)
+
+zeros :: Int -> [Value]
+zeros n = replicate n (VU32 0)
 
 ------------------------------------------------------------------------------
 -- Kernels that race
@@ -295,6 +436,14 @@ restaged = kernel "restaged" $ do
         store y threadIndex v
         tgStore stage threadIndex (threadIndex + 1)
 
+-- | The first pass of none of its blocks.
+stagedBuffers :: [(Name, [Value])]
+stagedBuffers = [("counts", map VU32 [0, 2, 1, 1]), ("y", zeros 64)]
+
+-- | The first pass of one block, the second of none.
+takenBuffers :: [(Name, [Value])]
+takenBuffers = [("counts", map VU32 [1, 0, 1, 1]), ("y", zeros 64)]
+
 {- | Passes that store over the stage or load it as a value of the pass picks,
 or, a near miss, both in the first.
 -}
@@ -456,3 +605,13 @@ tile t = kernel "tile" $ do
         (\r p -> pure [widen @Float (load a (r * k + p + fromIntegral x)) | x <- [0 .. 3 :: Int]])
         (\col p -> pure [widen @Float (load b (col * k + p + fromIntegral x)) | x <- [0 .. 7 :: Int]])
         (\r col v -> store c (r * 16 + col) v)
+
+tileParams :: [(Name, Value)]
+tileParams = [("k", VU32 16)]
+
+tileBuffers :: [(Name, [Value])]
+tileBuffers =
+  [ ("a", [VBF16 (BF16 0x3f80) | _ <- [1 .. 256 :: Int]])
+  , ("b", [VBF16 (BF16 0x3f80) | _ <- [1 .. 256 :: Int]])
+  , ("c", replicate 256 (VF32 0))
+  ]

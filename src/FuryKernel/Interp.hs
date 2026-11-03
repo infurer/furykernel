@@ -28,11 +28,18 @@ What the model makes explicit:
   outside their declared range, reads of threadgroup memory never
   written, integer division by zero and the one quotient that overflows,
   loops that never end, and barriers or SIMD-group operations reached by
-  part of a group.
+  part of a group;
+* races, as errors: every element remembers the threads that touched it,
+  and two threads touching one element unordered, one of them storing,
+  stop the run. A threadgroup barrier orders the threadgroup memory of
+  what came before it against what comes after, a SIMD-group barrier does
+  so for its group's lanes, and nothing orders device memory between
+  threads. A fragment operation is its SIMD group's lanes together.
 
-Between barriers, the lanes run in lockstep here, so a read that races
-with another lane's write still sees it; the hazard check of a later stage
-rejects such kernels instead.
+The threadgroups run one after another, in an order drawn from the seed;
+within one, the lanes run in lockstep, every lane evaluating a statement
+before its stores land, so it is the race detector, not the order, that
+finds what could differ on a target.
 -}
 module FuryKernel.Interp (
   Value (..),
@@ -42,7 +49,9 @@ module FuryKernel.Interp (
   withSeed,
   withTables,
   RunError (..),
+  Who (..),
   run,
+  runIR,
 ) where
 
 import Control.Monad (forM, forM_, unless, when)
@@ -137,6 +146,8 @@ data RunError
     ShortTable Name Int Int
   | UninitializedRead Name Int
   | DivideByZero
+  | -- | A launch size of IR the gate refuses that leaves u32 at a step: the step, and its value.
+    LaunchSizeOutOfRange Text Integer
   | -- | The one signed quotient that overflows: the minimum by -1.
     IntegerOverflow
   | {- | A loop that never ends: a lane's variable stood still (a step of 0)
@@ -145,12 +156,33 @@ data RunError
     NonTermination Name
   | DivergentBarrier
   | DivergentSimd Name
+  | {- | Two threads touched one element unordered, one of them storing: the
+    memory, the element, and who touched it first and how, then second.
+    -}
+    Race Name Integer Who Text Who Text
   | Internal Text
+  deriving stock (Eq, Show)
+
+-- | Who touched memory.
+data Who
+  = -- | A thread: its threadgroup and its index in it.
+    Thread Word32 Int
+  | {- | A SIMD group's lanes together, in a fragment operation: the
+    threadgroup and the group's index in it.
+    -}
+    Lanes Word32 Int
   deriving stock (Eq, Show)
 
 -- | Runs a kernel; returns every buffer as it is afterwards.
 run :: forall t. (Target t) => Checked t -> Launch -> Either RunError (Map Name [Value])
-run checked supplied = runST (runExceptT (execute (targetCaps @t) (checkedIR checked) supplied))
+run checked = runIR (targetCaps @t) (checkedIR checked)
+
+{- | Runs the IR of a kernel the gate need not have passed, on a target
+with these limits, such as one the hazard check refuses: the
+interpreter's own errors still hold.
+-}
+runIR :: TargetCaps -> IR.Kernel -> Launch -> Either RunError (Map Name [Value])
+runIR caps k supplied = runST (runExceptT (execute caps k supplied))
 
 type M s = ExceptT RunError (ST s)
 
@@ -162,6 +194,8 @@ data Env s = Env
   , envTables :: Map Name [STArray s Int Value]
   , envSeed :: Word64
   , envStoreCount :: STRef s Word64
+  , envMarks :: Map Name (STArray s Int Marks)
+  -- ^ Who touched each element of the buffers the kernel stores to.
   }
 
 -- | Per threadgroup: the locals as lane vectors, the threadgroup arrays.
@@ -169,7 +203,23 @@ data Group s = Group
   { groupIndex :: Word32
   , groupLocals :: STRef s (Map Name (STArray s Int Value))
   , groupTg :: Map Name (STArray s Int (Maybe Value))
+  , groupMarks :: Map Name (STArray s Int Marks)
+  , groupEpoch :: STRef s Int
+  -- ^ The threadgroup barriers so far.
+  , groupSimdEpochs :: STArray s Int Int
+  -- ^ Per SIMD group, its barriers and the threadgroup's so far.
   }
+
+-- | A touch of an element: who, after which barriers, and how.
+data Mark = Mark
+  { markWho :: Who
+  , markEpoch :: Int
+  , markSimd :: Int
+  , markWhat :: Text
+  }
+
+-- | An element's last store, and the loads since.
+data Marks = Marks (Maybe Mark) [Mark]
 
 execute :: forall s. TargetCaps -> IR.Kernel -> Launch -> M s (Map Name [Value])
 execute caps k supplied = do
@@ -208,14 +258,22 @@ execute caps k supplied = do
         lift (newListArray (0, extent - 1) (take extent vs))
       pure (t.tableName, arrays)
   counter <- lift (newSTRef 0)
-  let env = Env caps k paramMap (Map.fromList [(n, arr) | (n, (arr, _)) <- buffers]) (Map.fromList tables) supplied.launchSeed counter
+  marks <- forM [(b.bufName, arr) | b <- k.kernelBuffers, b.bufAccess /= ReadOnly, (n, (arr, _)) <- buffers, n == b.bufName] $ \(n, arr) -> do
+    (lo, hi) <- lift (getBounds arr)
+    (n,) <$> lift (newArray (lo, hi) (Marks Nothing []))
+  let env = Env caps k paramMap (Map.fromList [(n, arr) | (n, (arr, _)) <- buffers]) (Map.fromList tables) supplied.launchSeed counter (Map.fromList marks)
+      w = fromIntegral caps.capSimdWidth
+      simds = (fromIntegral k.kernelThreads + w - 1) `div` w
   groups <- hostU32 paramMap k.kernelGroups
-  forM_ (if groups == 0 then [] else [0 .. groups - 1]) $ \g -> do
+  forM_ (sortOn (\g -> mix (supplied.launchSeed `xor` mix (fromIntegral g + 0x9E3779B97F4A7C15))) (if groups == 0 then [] else [0 .. groups - 1])) $ \g -> do
     locals <- lift (newSTRef Map.empty)
     tg <- forM k.kernelTgArrays $ \a -> do
       arr <- lift (newArray (0, fromIntegral a.tgCount - 1) Nothing)
-      pure (a.tgName, arr)
-    let grp = Group g locals (Map.fromList tg)
+      touched <- lift (newArray (0, fromIntegral a.tgCount - 1) (Marks Nothing []))
+      pure ((a.tgName, arr), (a.tgName, touched))
+    epoch <- lift (newSTRef 0)
+    simdEpochs <- lift (newArray (0, max 0 (simds - 1)) 0)
+    let grp = Group g locals (Map.fromList (map fst tg)) (Map.fromList (map snd tg)) epoch simdEpochs
     block env grp (allLanes k) k.kernelBody
   forM (Map.fromList buffers) $ \(arr, rest) -> (<> rest) . elems <$> lift (freeze' arr)
  where
@@ -228,8 +286,9 @@ allLanes k = [0 .. fromIntegral k.kernelThreads - 1]
 {- | Launch sizes: u32 expressions over the parameters, as the host computes
 them. 'execute' checks the dimensions against their ranges first, and the
 gate keeps every step of a launch size in u32 for those
-("FuryKernel.Check.Launch"), so nothing here wraps, and the values agree
-with the u64 arithmetic of "FuryKernel.Emit.Rust".
+("FuryKernel.Check.Launch"), so the values agree with the u64 arithmetic
+of "FuryKernel.Emit.Rust"; on IR the gate refuses, a step that leaves u32
+is 'LaunchSizeOutOfRange'.
 -}
 hostU32 :: Map Name Value -> Expr -> M s Word32
 hostU32 params = \case
@@ -238,15 +297,18 @@ hostU32 params = \case
     Just (VU32 v) -> pure v
     _ -> throwE (MissingParam n)
   EBin op a b -> do
-    x <- hostU32 params a
-    y <- hostU32 params b
-    case op of
+    x <- toInteger <$> hostU32 params a
+    y <- toInteger <$> hostU32 params b
+    v <- case op of
       Add -> pure (x + y)
       Sub -> pure (x - y)
       Mul -> pure (x * y)
       Div -> if y == 0 then throwE DivideByZero else pure (x `div` y)
       Rem -> if y == 0 then throwE DivideByZero else pure (x `mod` y)
       _ -> throwE (Internal "launch size operator")
+    if v < 0 || v > toInteger (maxBound :: Word32)
+      then throwE (LaunchSizeOutOfRange (renderExpr (EBin op a b)) v)
+      else pure (fromInteger v)
   _ -> throwE (Internal "launch size expression")
 
 block :: Env s -> Group s -> [Int] -> [Stmt] -> M s ()
@@ -261,18 +323,20 @@ stmt env grp active s = unless (null active) $ case s of
     arr <- local n
     forM_ vs $ \(l, v) -> lift (writeArray arr l $! v)
   SStore b i e -> do
-    writes <- forM active $ \l -> (,) <$> (eval env grp l i >>= index) <*> eval env grp l e
+    writes <- forM active $ \l -> (l,,) <$> (eval env grp l i >>= index) <*> eval env grp l e
     arr <- maybe (throwE (MissingBuffer b)) pure (Map.lookup b env.envBuffers)
-    ordered <- shuffle writes
-    forM_ ordered $ \(ix, v) -> do
+    landing <- shuffle writes
+    forM_ landing $ \(l, ix, v) -> do
       checkBounds b arr ix
+      touch env grp True b ix (Thread grp.groupIndex l) True ("the store to " <> b <> "[" <> renderExpr i <> "]")
       lift (writeArray arr (fromIntegral ix) $! v)
   STgStore a i e -> do
-    writes <- forM active $ \l -> (,) <$> (eval env grp l i >>= index) <*> eval env grp l e
+    writes <- forM active $ \l -> (l,,) <$> (eval env grp l i >>= index) <*> eval env grp l e
     arr <- maybe (throwE (Internal ("threadgroup array " <> a))) pure (Map.lookup a grp.groupTg)
-    ordered <- shuffle writes
-    forM_ ordered $ \(ix, v) -> do
+    landing <- shuffle writes
+    forM_ landing $ \(l, ix, v) -> do
       checkBounds a arr ix
+      touch env grp False a ix (Thread grp.groupIndex l) True ("the store to " <> a <> "[" <> renderExpr i <> "]")
       lift (writeArray arr (fromIntegral ix) $! Just $! v)
   SLoadPack ns _ b i -> do
     let width = toInteger (length ns)
@@ -281,6 +345,7 @@ stmt env grp active s = unless (null active) $ case s of
       j <- eval env grp l i >>= index
       forM [j * width .. j * width + width - 1] $ \ix -> do
         checkBounds b arr ix
+        touch env grp True b ix (Thread grp.groupIndex l) False ("the pack loaded from " <> b <> " at " <> renderExpr i)
         lift (readArray arr (fromIntegral ix))
     forM_ (zip ns (transpose packs)) $ \(n, vs) -> do
       local' <- fresh n
@@ -301,22 +366,24 @@ stmt env grp active s = unless (null active) $ case s of
     writes <- forM active $ \l -> do
       j <- eval env grp l i >>= index
       vs <- forM es (eval env grp l)
-      pure (zip [j * width ..] vs)
+      pure [(l, ix, v) | (ix, v) <- zip [j * width ..] vs]
     arr <- maybe (throwE (MissingBuffer b)) pure (Map.lookup b env.envBuffers)
-    ordered <- shuffle writes
-    forM_ (concat ordered) $ \(ix, v) -> do
+    landing <- shuffle writes
+    forM_ (concat landing) $ \(l, ix, v) -> do
       checkBounds b arr ix
+      touch env grp True b ix (Thread grp.groupIndex l) True ("the pack stored to " <> b <> " at " <> renderExpr i)
       lift (writeArray arr (fromIntegral ix) $! v)
   STgStorePack a i es -> do
     let width = toInteger (length es)
     writes <- forM active $ \l -> do
       j <- eval env grp l i >>= index
       vs <- forM es (eval env grp l)
-      pure (zip [j * width ..] vs)
+      pure [(l, ix, v) | (ix, v) <- zip [j * width ..] vs]
     arr <- maybe (throwE (Internal ("threadgroup array " <> a))) pure (Map.lookup a grp.groupTg)
-    ordered <- shuffle writes
-    forM_ (concat ordered) $ \(ix, v) -> do
+    landing <- shuffle writes
+    forM_ (concat landing) $ \(l, ix, v) -> do
       checkBounds a arr ix
+      touch env grp False a ix (Thread grp.groupIndex l) True ("the pack stored to " <> a <> " at " <> renderExpr i)
       lift (writeArray arr (fromIntegral ix) $! Just $! v)
   SIf _ c th el -> do
     conds <- forM active $ \l -> (l,) <$> (eval env grp l c >>= bool)
@@ -342,16 +409,20 @@ stmt env grp active s = unless (null active) $ case s of
               lift (writeArray arr l $! VU32 (i + d))
             go (iterations + 1) continuing
     go 0 active
-  SBarrier ->
+  SBarrier -> do
     unless (active == allLanes env.envKernel) $ throwE DivergentBarrier
+    lift (modifySTRef' grp.groupEpoch (+ 1))
+    (lo, hi) <- lift (getBounds grp.groupSimdEpochs)
+    forM_ [lo .. hi] $ \g -> lift (readArray grp.groupSimdEpochs g >>= writeArray grp.groupSimdEpochs g . (+ 1))
   SSimdBarrier -> do
     let w = fromIntegral env.envCaps.capSimdWidth
         threads = fromIntegral env.envKernel.kernelThreads
         groupsOf = [[g * w .. min threads ((g + 1) * w) - 1] | g <- [0 .. (threads + w - 1) `div` w - 1]]
         activeSet = IntSet.fromList active
-    forM_ groupsOf $ \lanes -> do
+    forM_ (zip [0 ..] groupsOf) $ \(g, lanes) -> do
       let present = filter (`IntSet.member` activeSet) lanes
       unless (null present || present == lanes) $ throwE (DivergentSimd "simdgroup barrier")
+      unless (null present) $ lift (readArray grp.groupSimdEpochs g >>= writeArray grp.groupSimdEpochs g . (+ 1))
   SSimd n op _ e -> do
     let w = fromIntegral env.envCaps.capSimdWidth
         threads = fromIntegral env.envKernel.kernelThreads
@@ -375,6 +446,7 @@ stmt env grp active s = unless (null active) $ case s of
     forM_ [(r, c) | r <- [0 .. 7], c <- [0 .. 7]] $ \(r, c) -> do
       let ix = base + (if tr then c * stride + r else r * stride + c)
       v <- fragMemoryRead m ix
+      touchFragment m ix g False ("the fragment loaded from " <> memoryName m <> " at " <> renderExpr i)
       lift (writeArray arr (g * 64 + fromIntegral (r * 8 + c)) $! v)
   SFragStore m i st n -> simdGroups n $ \g lane -> do
     base <- eval env grp lane i >>= index
@@ -383,12 +455,14 @@ stmt env grp active s = unless (null active) $ case s of
     forM_ [(r, c) | r <- [0 .. 7], c <- [0 .. 7]] $ \(r, c) -> do
       v <- lift (readArray arr (g * 64 + fromIntegral (r * 8 + c)))
       fragMemoryWrite m (base + r * stride + c) v
+      touchFragment m (base + r * stride + c) g True ("the fragment stored to " <> memoryName m <> " at " <> renderExpr i)
   SFragScaleRows f a i -> simdGroups f $ \g lane -> do
     base <- eval env grp lane i >>= index
     arr <- maybe (throwE (Internal ("threadgroup array " <> a))) pure (Map.lookup a grp.groupTg)
     ff <- fragment f
     forM_ [0 .. 7] $ \r -> do
       checkBounds a arr (base + r)
+      touch env grp False a (base + r) (Lanes grp.groupIndex g) False ("the row scales read from " <> a <> " at " <> renderExpr i)
       scale <- lift (readArray arr (fromIntegral (base + r))) >>= maybe (throwE (UninitializedRead a (fromIntegral (base + r)))) pure >>= asFloat
       forM_ [0 .. 7] $ \col -> do
         v <- lift (readArray ff (g * 64 + fromIntegral (r * 8 + col))) >>= asFloat
@@ -411,6 +485,12 @@ stmt env grp active s = unless (null active) $ case s of
     fd <- fragment d
     forM_ results $ \(e, v) -> lift (writeArray fd (g * 64 + e) $! VF32 v)
  where
+  touchFragment m ix g store what = case m of
+    FDevice b -> touch env grp True b ix (Lanes grp.groupIndex g) store what
+    FThreadgroup a -> touch env grp False a ix (Lanes grp.groupIndex g) store what
+  memoryName = \case
+    FDevice b -> b
+    FThreadgroup a -> a
   -- A fragment operation, once per SIMD group with any lane active: every
   -- lane of it must be, and the group's first lane gives the addresses.
   simdGroups :: Name -> (Int -> Int -> M s ()) -> M s ()
@@ -485,6 +565,46 @@ stmt env grp active s = unless (null active) $ case s of
     count <- lift (readSTRef env.envStoreCount)
     lift (modifySTRef' env.envStoreCount (+ 1))
     pure (map snd (sortOn fst [(mix (env.envSeed `xor` mix count `xor` fromIntegral j), w) | (j, w) <- zip [0 :: Int ..] writes]))
+
+{- | A touch of element @ix@ of a threadgroup array or, for @device@, of a
+buffer the kernel stores to: a race with an earlier touch it isn't ordered
+after, one of them a store, is an error.
+-}
+touch :: Env s -> Group s -> Bool -> Name -> Integer -> Who -> Bool -> Text -> M s ()
+touch env grp device name ix who store what =
+  case Map.lookup name (if device then env.envMarks else grp.groupMarks) of
+    Nothing -> pure ()
+    Just arr -> do
+      epoch <- if device then pure 0 else lift (readSTRef grp.groupEpoch)
+      simd <- if device then pure 0 else lift (readArray grp.groupSimdEpochs (snd (simdOf who)))
+      let now = Mark who epoch simd what
+          unordered m = not (ordered m now)
+      Marks lastStore loads <- lift (readArray arr (fromIntegral ix))
+      case [m | Just m <- [lastStore], unordered m] <> (if store then filter unordered loads else []) of
+        m : _ -> throwE (Race name ix m.markWho m.markWhat who what)
+        [] -> pure ()
+      -- A load before the last barrier is ordered before any touch to
+      -- come, one superseded by a later one of the same thread is no
+      -- longer needed, and on device memory one other thread's suffices.
+      lift . writeArray arr (fromIntegral ix) $!
+        if store
+          then Marks (Just now) []
+          else Marks lastStore (now : (if device then take 1 else id) [l | l <- loads, l.markEpoch >= epoch, not (same l.markWho who)])
+ where
+  w = fromIntegral env.envCaps.capSimdWidth
+  simdOf = \case
+    Thread g t -> (g, t `div` w)
+    Lanes g s -> (g, s)
+  same a b = case (a, b) of
+    (Thread g t, Thread g' t') -> g == g' && t == t'
+    _ -> False
+  -- One thread's touches in its own order; on threadgroup memory, a
+  -- barrier's, and among a SIMD group's lanes, a SIMD-group barrier's.
+  ordered a b
+    | same a.markWho b.markWho = True
+    | device = False
+    | a.markEpoch < b.markEpoch = True
+    | otherwise = simdOf a.markWho == simdOf b.markWho && a.markSimd < b.markSimd
 
 -- | The array an entry of a table points at.
 tableEntry :: Env s -> Name -> Value -> M s (STArray s Int Value)
@@ -567,6 +687,7 @@ eval env grp lane = go
       ix <- go i >>= u32
       arr <- maybe (throwE (MissingBuffer n)) pure (Map.lookup n env.envBuffers)
       checkBounds n arr (toInteger ix)
+      touch env grp True n (toInteger ix) (Thread grp.groupIndex lane) False ("the load of " <> n <> "[" <> renderExpr i <> "]")
       lift (readArray arr (fromIntegral ix))
     ELoadVia n e i -> do
       arr <- tableEntry env n =<< go e
@@ -577,6 +698,7 @@ eval env grp lane = go
       ix <- go i >>= u32
       arr <- maybe (throwE (Internal ("threadgroup array " <> n))) pure (Map.lookup n grp.groupTg)
       checkBounds n arr (toInteger ix)
+      touch env grp False n (toInteger ix) (Thread grp.groupIndex lane) False ("the load of " <> n <> "[" <> renderExpr i <> "]")
       lift (readArray arr (fromIntegral ix)) >>= maybe (throwE (UninitializedRead n (fromIntegral ix))) pure
 
 literal :: Literal -> Value
