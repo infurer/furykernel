@@ -51,6 +51,8 @@ library
     FuryKernel.Backend
     FuryKernel.Build
     FuryKernel.Check
+    FuryKernel.Check.Affine
+    FuryKernel.Check.Hazard
     FuryKernel.Check.Launch
     FuryKernel.Constraint
     FuryKernel.Cpu
@@ -89,6 +91,7 @@ test-suite furykernel-test
   main-is: Main.hs
   other-modules:
     Test.FuryKernel.AbiTest
+    Test.FuryKernel.AffineTest
     Test.FuryKernel.BuildTest
     Test.FuryKernel.CheckTest
     Test.FuryKernel.ConstraintTest
@@ -97,6 +100,7 @@ test-suite furykernel-test
     Test.FuryKernel.FragmentTest
     Test.FuryKernel.Gemv
     Test.FuryKernel.GemvTest
+    Test.FuryKernel.HazardTest
     Test.FuryKernel.InterpTest
     Test.FuryKernel.JsonTest
     Test.FuryKernel.Kernels

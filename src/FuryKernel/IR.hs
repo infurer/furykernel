@@ -380,6 +380,11 @@ data Buffer = Buffer
   -- ^ The alignment of the buffer's start, in bytes.
   , bufExtent :: Expr
   -- ^ The number of elements the kernel may touch, over the parameters.
+  , bufApart :: Bool
+  {- ^ Whether the threadgroups touch disjoint elements of it where one of
+  them stores, as the launch's data keeps: the hazard check takes it,
+  the interpreter checks it.
+  -}
   }
   deriving stock (Eq, Show)
 
@@ -486,6 +491,7 @@ renderKernel k =
       <> renderExpr b.bufExtent
       <> "] align "
       <> showT b.bufAlign
+      <> (if b.bufApart then " apart" else "")
   access = \case
     ReadOnly -> "read"
     WriteOnly -> "write"

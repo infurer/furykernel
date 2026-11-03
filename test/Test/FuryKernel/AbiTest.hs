@@ -10,7 +10,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word32)
 import FuryKernel.Abi
-import FuryKernel.Build (Exp, buffer, dim, groups, kernel, kernelIR, load, narrow, param, store, strided, threads, widen)
+import FuryKernel.Build (Exp, apart, buffer, dim, groups, kernel, kernelIR, load, narrow, param, store, strided, threads, widen)
 import FuryKernel.Build qualified as B
 import FuryKernel.Check (Checked, check)
 import FuryKernel.Constraint (AlignOk)
@@ -124,22 +124,23 @@ tests =
               ]
     , testCase "an override: the kernel's ABI, and a contract at least as permissive" $ do
         portable <- gate (scale @T32)
-        let override name r extent = gate (scaleLike name r extent) >>= overrides portable . pure
-        override "scale_v8" (DimRange 8 65536 8) (+ 8)
+        let override name r extent apartY = gate (scaleLike name r extent apartY) >>= overrides portable . pure
+        override "scale_v8" (DimRange 8 65536 8) (+ 8) False
           >>= ( @?=
                   [ "No override of scale takes n = 1, which it takes."
                   , "The override scale_v8's extent of x, n + 8, is larger than scale's, n, at n = 8: 16 against 8."
                   , "The override scale_v8's extent of y, n + 8, is larger than scale's, n, at n = 8: 16 against 8."
                   ]
               )
-        override "scale_wide" (DimRange 0 131072 1) id >>= (@?= [])
-        override "scale_more" (DimRange 1 65536 1) (+ 1)
+        override "scale_wide" (DimRange 0 131072 1) id False >>= (@?= [])
+        override "scale_more" (DimRange 1 65536 1) (+ 1) False
           >>= ( @?=
                   [ "The override scale_more's extent of x, n + 1, is larger than scale's, n, at n = 1: 2 against 1."
                   , "The override scale_more's extent of y, n + 1, is larger than scale's, n, at n = 1: 2 against 1."
                   ]
               )
-        realigned <- gate (B.kernel "scale_32" (scaleSig @32 (DimRange 1 65536 1) id))
+        override "scale_apart" (DimRange 1 65536 1) id True >>= (@?= ["The override scale_apart declares y apart, and scale doesn't."])
+        realigned <- gate (B.kernel "scale_32" (scaleSig @32 (DimRange 1 65536 1) id False))
         overrides portable [realigned]
           >>= (@?= ["The override scale_32 has another ABI than scale: buffer x read bf16 align 32 where scale has buffer x read bf16 align 16."])
         scalarN <- gate scaleScalar
@@ -175,16 +176,17 @@ overrides k os = do
   when (any ((/= Overrides) . (.findingRule)) fs) $ assertFailure (show fs)
   pure (map (.findingMessage) fs)
 
--- | 'scale' with another range and extent: what an override may change.
-scaleLike :: Name -> DimRange -> (Exp Word32 -> Exp Word32) -> B.Kernel T32
-scaleLike name r extent = kernel name (scaleSig @16 r extent)
+-- | 'scale' with another range, extent and apart: what an override may change.
+scaleLike :: Name -> DimRange -> (Exp Word32 -> Exp Word32) -> Bool -> B.Kernel T32
+scaleLike name r extent apartY = kernel name (scaleSig @16 r extent apartY)
 
-scaleSig :: forall align. (KnownNat align, AlignOk BF16 align) => DimRange -> (Exp Word32 -> Exp Word32) -> B.Sig T32 (B.Scope T32 (B.K B.Uniform ()))
-scaleSig r extent = do
+scaleSig :: forall align. (KnownNat align, AlignOk BF16 align) => DimRange -> (Exp Word32 -> Exp Word32) -> Bool -> B.Sig T32 (B.Scope T32 (B.K B.Uniform ()))
+scaleSig r extent apartY = do
   n <- dim "n" r
   s <- param @Float "s"
   x <- buffer @B.ReadOnly @align @BF16 "x" (extent n)
   y <- buffer @B.WriteOnly @16 @BF16 "y" (extent n)
+  when apartY (apart y)
   threads @64
   groups 1
   pure . pure $

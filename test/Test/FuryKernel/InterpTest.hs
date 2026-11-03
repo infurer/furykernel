@@ -7,13 +7,13 @@ module Test.FuryKernel.InterpTest (tests) where
 
 import Data.Bits ((.&.))
 import Data.Int (Int32, Int8)
-import Data.List (nub)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Data.Word (Word16, Word32, Word8)
 import FuryKernel.Build
 import FuryKernel.Check (check)
 import FuryKernel.Constraint (PackOk, TgArrayOk, ThreadsOk)
+import FuryKernel.Finding (Finding (..), Rule (..))
 import FuryKernel.IR (DimRange (..), Name)
 import FuryKernel.Interp
 import FuryKernel.Numerics (narrowBF16, narrowF16Double, widenBF16, widenF16)
@@ -27,7 +27,7 @@ import Test.FuryKernel.Kernels (scale, scalePacked)
 import Test.FuryKernel.Run (runOn)
 import Test.FuryKernel.Targets (T16, T32, T64, T8)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, testCase, (@?=))
+import Test.Tasty.HUnit (testCase, (@?=))
 import Test.Tasty.Hedgehog (testProperty)
 
 tests :: TestTree
@@ -84,9 +84,8 @@ tests =
         -- The binary16 exps and log that rounding through binary32 would
         -- round twice: 0x3C08, 0x3C18 and 0xC53C.
         [gs !! (4 * 0x1F79 + 1), gs !! (4 * 0x25CF + 1), gs !! (4 * 0x1D78 + 2)] @?= [0x3C07, 0x3C17, 0xC53B]
-    , testCase "a race shows as results that depend on the seed" $ do
-        let outcomes = nub [runOn @T32 racy [] [("y", [VU32 0])] seed | seed <- [1 .. 16]]
-        assertBool "more than one outcome" (length outcomes > 1)
+    , testCase "the gate refuses a race, two threads' stores to one element" $
+        either (map (.findingRule)) (const []) (check (racy @T32)) @?= [Hazards]
     , testCase "tables: elements and packs of the array an entry points at" $ do
         let arrays = [[VF32 (fromIntegral (10 * e + i)) | i <- [0 .. 3 :: Int]] | e <- [0 .. 2 :: Int]]
             launchAt entry = withTables (Map.fromList [("arrays", arrays)]) (launch (Map.fromList [("entry", VU32 entry)]) (Map.fromList [("y", replicate 6 (VF32 0))]))

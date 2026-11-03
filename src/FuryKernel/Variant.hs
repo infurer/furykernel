@@ -8,11 +8,15 @@ compute but not what (rows per SIMD group, threads, pack width, split-K),
 and its shape classes, the problem sizes it bakes into kernels. For each
 class, 'enumerate' visits every point of the axes and prunes, in order:
 
-1. legality: the family builds the kernel, and the gate accepts it;
+1. legality: the family builds the kernel, and the gate's rules but the
+   hazard check accept it;
 2. divisibility: the family's rule, e.g. a class's dimensions by the pack
    width or by the rows of a threadgroup;
 3. parallelism: at least twice as many threadgroups as the GPU has cores;
-4. duplicates: points whose kernels have the same IR, names aside.
+4. duplicates: points whose kernels have the same IR, names aside, as a
+   kept point's;
+5. hazards: the gate's last rule ('checkStaged'), once for each kernel
+   that the others leave, which a duplicate shares.
 
 What remains are the class's variants, named @family_class_x_axiskey@, as
 in @gemv_n4096_k2816_m1_x_r2_t128_p8_s1@, and @family_class@ for a family
@@ -68,8 +72,8 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isNothing, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import FuryKernel.Build (Kernel)
-import FuryKernel.Check (Checked, check, checkedIR)
+import FuryKernel.Build (Kernel, kernelIR)
+import FuryKernel.Check (Checked, checkStaged)
 import FuryKernel.Check.Launch (kernelBox, launchSize, lowest)
 import FuryKernel.Finding (Finding)
 import FuryKernel.IR (Name)
@@ -250,29 +254,45 @@ checkSpace space =
 
 -- | A point for a class, pruned by everything but duplicates.
 consider :: (Target t) => Profile -> Space t -> Shape -> Point -> Outcome t
-consider profile space shape point =
-  case space.spaceKernel (variantName space shape point) shape point >>= check of
-    Left findings -> Illegal findings
-    Right checked
-      | reasons@(_ : _) <- space.spaceDivides shape point -> Indivisible reasons
-      | groups < 2 * profile.profileCores -> TooFewGroups groups
-      | otherwise -> Kept (Variant shape point checked groups)
-     where
-      groups = launchGroups (checkedIR checked)
+consider profile space shape point = case pruned profile space shape point of
+  Left outcome -> outcome
+  Right (_, hazards, groups) -> either Illegal (\c -> Kept (Variant shape point c groups)) hazards
 
--- | Every point of a class and what pruning made of it.
+{- | A point pruned by everything but duplicates and the hazard check:
+its outcome, or its kernel's IR, the hazard check's verdict, not yet run,
+and its fewest threadgroups.
+-}
+pruned :: (Target t) => Profile -> Space t -> Shape -> Point -> Either (Outcome t) (IR.Kernel, Either [Finding] (Checked t), Natural)
+pruned profile space shape point =
+  case space.spaceKernel (variantName space shape point) shape point of
+    Left findings -> Left (Illegal findings)
+    Right k -> case checkStaged k of
+      Left findings -> Left (Illegal findings)
+      Right hazards
+        | reasons@(_ : _) <- space.spaceDivides shape point -> Left (Indivisible reasons)
+        | groups < 2 * profile.profileCores -> Left (TooFewGroups groups)
+        | otherwise -> Right (kernelIR k, hazards, groups)
+       where
+        groups = launchGroups (kernelIR k)
+
+{- | Every point of a class and what pruning made of it: a point whose
+kernel has a kept point's IR is that point's duplicate, its hazard check
+the kept one's.
+-}
 enumerate :: (Target t) => Profile -> Space t -> Shape -> [(Point, Outcome t)]
 enumerate profile space shape = go Map.empty (points space.spaceAxes)
  where
   go _ [] = []
-  go seen (p : ps) = case consider profile space shape p of
-    Kept v
-      | Just first <- Map.lookup (bodyText v) seen -> (p, SameAs first) : go seen ps
-      | otherwise -> (p, Kept v) : go (Map.insert (bodyText v) p seen) ps
-    outcome -> (p, outcome) : go seen ps
-  -- The kernel's IR under the family's name, as text, so that only the body counts.
-  bodyText :: Variant t -> Text
-  bodyText v = IR.renderKernel (checkedIR v.variantKernel) {IR.kernelName = space.spaceFamily}
+  go seen (p : ps) = case pruned profile space shape p of
+    Left outcome -> (p, outcome) : go seen ps
+    Right (ir, hazards, groups)
+      | Just first <- Map.lookup body seen -> (p, SameAs first) : go seen ps
+      | otherwise -> case hazards of
+          Right c -> (p, Kept (Variant shape p c groups)) : go (Map.insert body p seen) ps
+          Left findings -> (p, Illegal findings) : go seen ps
+     where
+      -- The kernel's IR under the family's name, as text, so that only the body counts.
+      body = IR.renderKernel ir {IR.kernelName = space.spaceFamily}
 
 -- | The kept variants of a class, in enumeration order.
 variants :: (Target t) => Profile -> Space t -> Shape -> [Variant t]

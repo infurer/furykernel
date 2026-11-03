@@ -34,22 +34,28 @@ typed surface or not, and re-check what the types promise:
   the alignments, by the rules of "FuryKernel.Constraint", and the SIMD
   width the kernel was built for;
 * packs: each pack's width against the target's lane loads and its
-  buffer's alignment, by the same module's rule.
+  buffer's alignment, by the same module's rule;
+* hazards, on a kernel that passes every other rule: no two threads touch
+  one element of memory unordered while one of them stores to it
+  ("FuryKernel.Check.Hazard").
 
-Races, bounds and the order of memory operations come with the hazard and
-bounds checks of later stages.
+A launch binds each of a kernel's buffers to memory of its own, no two of
+them overlapping: the uniformity of what a buffer the kernel never writes
+holds, and the hazard check's accesses, rely on it. Bounds come with the
+bounds check of a later stage.
 -}
 module FuryKernel.Check (
   Checked,
   checkedIR,
   check,
+  checkStaged,
   checkIR,
   nameProblem,
   reservedNames,
 ) where
 
 import Control.Applicative ((<|>))
-import Control.Monad (forM_, unless, when)
+import Control.Monad (forM_, join, unless, when)
 import Control.Monad.Trans.State.Strict (State, execState, gets, modify')
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
 import Data.Foldable (traverse_)
@@ -61,6 +67,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import FuryKernel.Build (Kernel, kernelCaps, kernelIR, kernelProblems)
+import FuryKernel.Check.Hazard (checkHazards)
 import FuryKernel.Check.Launch (checkLaunchSizes)
 import FuryKernel.Constraint (checkAlign, checkBuffers, checkPack, checkTgArrayOf, checkTgTotal, checkThreads)
 import FuryKernel.Finding (Finding (..), Location (..), Rule (..), locatedAt)
@@ -83,17 +90,38 @@ target's caps, its IR baking in that target's SIMD width and limits, is
 refused.
 -}
 check :: forall t. (Target t) => Kernel t -> Either [Finding] (Checked t)
-check k
+check = join . checkStaged
+
+{- | The gate in two stages: 'Left' the findings of a kernel that what the
+builder noticed or a rule other than the hazard check refuses, as 'check'
+gives them; 'Right', for any other kernel, the hazard check's verdict,
+computed only when it is looked at. @check@ is the two joined, so
+"FuryKernel.Variant" can prune a kernel between them.
+-}
+checkStaged :: forall t. (Target t) => Kernel t -> Either [Finding] (Either [Finding] (Checked t))
+checkStaged k
   | kernelCaps k /= caps = Left [Finding Target ("The kernel was built for " <> (kernelCaps k).capName <> ", whose SIMD width and limits its IR holds; it is checked only for that target, not for " <> caps.capName <> ".")]
-  | otherwise = case map (placedIn (kernelIR k)) (kernelProblems k) <> checkIR caps (kernelIR k) of
-      [] -> Right (Checked (kernelIR k))
-      findings -> Left findings
+  | null problems, null early = Right (if null hazards then Right (Checked ir) else Left hazards)
+  | otherwise = Left (problems <> if null early then hazards else early)
  where
   caps = targetCaps @t
+  ir = kernelIR k
+  problems = map (placedIn ir) (kernelProblems k)
+  early = map (placedIn ir) (checkBeforeHazards caps ir)
+  hazards = map (placedIn ir) (checkHazardsOf caps ir)
 
 -- | Every finding for a kernel's IR on a target with these limits.
 checkIR :: TargetCaps -> IR.Kernel -> [Finding]
-checkIR caps k = map (placedIn k) $ checkNames k <> checkTyping k <> checkLaunchSizes k <> checkUniformity k <> checkResources caps k <> checkPacks caps k <> checkFragments caps k
+checkIR caps k = map (placedIn k) $ case checkBeforeHazards caps k of
+  [] -> checkHazardsOf caps k
+  findings -> findings
+
+-- | The rules but the hazard check, which runs only on a kernel these pass.
+checkBeforeHazards :: TargetCaps -> IR.Kernel -> [Finding]
+checkBeforeHazards caps k = checkNames k <> checkTyping k <> checkLaunchSizes k <> checkUniformity k <> checkResources caps k <> checkPacks caps k <> checkFragments caps k
+
+checkHazardsOf :: TargetCaps -> IR.Kernel -> [Finding]
+checkHazardsOf caps k = checkHazards caps (Map.keysSet (Map.filter (== U) (uniformityOf k))) k
 
 {- | A finding placed in its kernel, if nothing placed it more closely: a
 finding's place is its kernel and the ifs and loops around what it is about.
@@ -527,64 +555,7 @@ regionUni = \case
 checkUniformity :: IR.Kernel -> [Finding]
 checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
  where
-  -- A local's uniformity: the join over everything bound or assigned to
-  -- it, and the regions it happens in. Iterated to a fixpoint, since a
-  -- loop can carry divergence back to the top.
-  locals = fixpoint Map.empty
-  top = epochs k.kernelBody
-  fixpoint m = let m' = pass U top m k.kernelBody in if m' == m then m else fixpoint m'
-  pass r es m ss = foldl' (\m' (e, s) -> step r e m' s) m (zip es ss)
-  step r (Epoch stored inside) m = \case
-    SLet n _ e -> bind n (uni m e) m
-    SVar n _ e -> bind n (max r (uni m e)) m
-    SAssign n e -> bind n (max r (uni m e)) m
-    SSimd n _ _ _ -> bind n (max r S) m
-    SLoadPack ns _ b i -> foldl' (\m' n -> bind n (uni m (ELoad b i)) m') m ns
-    SLoadPackVia ns _ b e i -> foldl' (\m' n -> bind n (uni m (ELoadVia b e i)) m') m ns
-    SIf d c th el ->
-      let r' = inner r d (uni m c)
-          (eth, eel) = blocks2 inside
-       in pass r' eel (pass r' eth m th) el
-    SFor d v start end st body ->
-      let control = maximum [uni m start, uni m end, uni m st]
-          r' = inner r d control
-       in pass r' (blocks1 inside) (bind v (max r' control) m) body
-    _ -> m
-   where
-    uni = uniIn stored
-  bind = Map.insertWith max
-  -- The region inside a construct: the declared one when it is honest,
-  -- the actual one when it is not, and never more uniform than outside.
-  inner r d control = maximum [r, regionUni d, control]
-
-  uniIn :: Set Name -> Map Name Uni -> Expr -> Uni
-  uniIn stored m = \case
-    ELit _ -> U
-    EParam _ -> U
-    EBuiltin b -> case b of
-      GroupInGrid -> U
-      SimdGroup -> S
-      SimdLane -> D
-      ThreadInGroup -> D
-    EVar n -> Map.findWithDefault D n m
-    EUn _ e -> uniIn stored m e
-    EBin _ a b -> max (uniIn stored m a) (uniIn stored m b)
-    ESelect c a b -> maximum [uniIn stored m c, uniIn stored m a, uniIn stored m b]
-    EFma a b c -> maximum [uniIn stored m a, uniIn stored m b, uniIn stored m c]
-    EConvert _ e -> uniIn stored m e
-    ENarrowInt _ _ e -> uniIn stored m e
-    -- Only a buffer the kernel never writes reads the same in every thread.
-    -- Tables are only read: the same entry and index read the same element.
-    ELoadVia _ e i -> max (uniIn stored m e) (uniIn stored m i)
-    ELoad n i
-      | n `elem` readOnly -> uniIn stored m i
-      | otherwise -> D
-    -- No thread stores to the array in the load's barrier epoch, so every
-    -- thread that loads an element reads one value.
-    ETgLoad n i
-      | not (Set.member n stored) -> uniIn stored m i
-      | otherwise -> D
-  readOnly = [b.bufName | b <- k.kernelBuffers, b.bufAccess == ReadOnly]
+  locals = uniformityOf k
 
   report :: [Text] -> Rule -> Text -> State [Finding] ()
   report place rule m = modify' (<> [locatedAt (Location k.kernelName (reverse place)) (Finding rule m)])
@@ -621,7 +592,7 @@ checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
     SFragScaleRows f _ i -> fragment f [i]
     _ -> pure ()
    where
-    uni = uniIn stored
+    uni = uniformityIn k stored
     -- A SIMD group's fragment operation: every lane active, and its
     -- memory's index and stride the same in every lane.
     fragment n addresses = do
@@ -643,6 +614,76 @@ checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
     U -> "uniform across the threadgroup"
     S -> "uniform across each SIMD group"
     D -> "divergent across lanes"
+
+{- | Each local's uniformity: the join over everything bound or assigned to
+it, and the regions it happens in. Iterated to a fixpoint, since a loop can
+carry divergence back to the top.
+-}
+uniformityOf :: IR.Kernel -> Map Name Uni
+uniformityOf k = fixpoint Map.empty
+ where
+  top = epochs k.kernelBody
+  fixpoint m = let m' = pass U top m k.kernelBody in if m' == m then m else fixpoint m'
+  pass r es m ss = foldl' (\m' (e, s) -> step r e m' s) m (zip es ss)
+  step r (Epoch stored inside) m = \case
+    SLet n _ e -> bind n (uni m e) m
+    SVar n _ e -> bind n (max r (uni m e)) m
+    SAssign n e -> bind n (max r (uni m e)) m
+    SSimd n _ _ _ -> bind n (max r S) m
+    SLoadPack ns _ b i -> foldl' (\m' n -> bind n (uni m (ELoad b i)) m') m ns
+    SLoadPackVia ns _ b e i -> foldl' (\m' n -> bind n (uni m (ELoadVia b e i)) m') m ns
+    SIf d c th el ->
+      let r' = inner r d (uni m c)
+          (eth, eel) = blocks2 inside
+       in pass r' eel (pass r' eth m th) el
+    SFor d v start end st body ->
+      let control = maximum [uni m start, uni m end, uni m st]
+          r' = inner r d control
+       in pass r' (blocks1 inside) (bind v (max r' control) m) body
+    _ -> m
+   where
+    uni = uniformityIn k stored
+  bind = Map.insertWith max
+
+{- | The region inside a construct: the declared one when it is honest, the
+actual one when it is not, and never more uniform than outside.
+-}
+inner :: Uni -> Region -> Uni -> Uni
+inner r d control = maximum [r, regionUni d, control]
+
+{- | An expression's uniformity, given its locals' and the threadgroup
+arrays that a store can change in its barrier epoch.
+-}
+uniformityIn :: IR.Kernel -> Set Name -> Map Name Uni -> Expr -> Uni
+uniformityIn k stored m = \case
+  ELit _ -> U
+  EParam _ -> U
+  EBuiltin b -> case b of
+    GroupInGrid -> U
+    SimdGroup -> S
+    SimdLane -> D
+    ThreadInGroup -> D
+  EVar n -> Map.findWithDefault D n m
+  EUn _ e -> uni e
+  EBin _ a b -> max (uni a) (uni b)
+  ESelect c a b -> maximum [uni c, uni a, uni b]
+  EFma a b c -> maximum [uni a, uni b, uni c]
+  EConvert _ e -> uni e
+  ENarrowInt _ _ e -> uni e
+  -- Only a buffer the kernel never writes reads the same in every thread.
+  -- Tables are only read: the same entry and index read the same element.
+  ELoadVia _ e i -> max (uni e) (uni i)
+  ELoad n i
+    | n `elem` readOnly -> uni i
+    | otherwise -> D
+  -- No thread stores to the array in the load's barrier epoch, so every
+  -- thread that loads an element reads one value.
+  ETgLoad n i
+    | not (Set.member n stored) -> uni i
+    | otherwise -> D
+ where
+  uni = uniformityIn k stored m
+  readOnly = [b.bufName | b <- k.kernelBuffers, b.bufAccess == ReadOnly]
 
 {- | A statement's barrier epoch, for the divergence analysis: the
 threadgroup arrays that some thread may store to between the threadgroup

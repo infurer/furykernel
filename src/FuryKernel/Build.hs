@@ -87,6 +87,7 @@ module FuryKernel.Build (
   dim,
   param,
   buffer,
+  apart,
   table,
   threads,
   groups,
@@ -650,9 +651,18 @@ buffer ::
   Sig t (Buf t acc align a)
 buffer n (Exp extent) = Sig $ do
   claim n
-  let b' = IR.Buffer n (accessOf @acc) (scalarType @a) (natVal (Proxy @align)) extent
+  let b' = IR.Buffer n (accessOf @acc) (scalarType @a) (natVal (Proxy @align)) extent False
   modify' (\b -> b {buffers = b.buffers Seq.|> b'})
   pure (Buf n)
+
+{- | @apart b@: the threadgroups touch disjoint elements of @b@ where one of
+them stores to it, as the launch's data keeps (rows at distinct positions
+of their sequences, routes to distinct experts). The hazard check takes it
+for pairs of threadgroups instead of proving it, the interpreter checks it
+on every run, and the manifest records it.
+-}
+apart :: Buf t acc align a -> Sig t ()
+apart (Buf n) = Sig $ modify' (\b -> b {buffers = fmap (\x -> if x.bufName == n then x {IR.bufApart = True} else x) b.buffers})
 
 {- | @table \@16 \@BF16 "experts" entries extent@: a table of @entries@
 addresses, each of an array of which the kernel may touch @extent@

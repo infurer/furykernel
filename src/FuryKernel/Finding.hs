@@ -52,6 +52,10 @@ data Rule
     only where every lane does.
     -}
     Regions
+  | {- | Hazards: no two threads touch one element of memory unordered while
+    one of them stores to it.
+    -}
+    Hazards
   | {- | Programs: sources, values and nodes of unique ids, increasing in
     program order, and every value made by one node.
     -}

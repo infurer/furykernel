@@ -178,8 +178,8 @@ tests =
               ]
     , testCase "packs: width and alignment against the target" $ do
         let packed buffers body = checkIR (targetCaps @T32) (base body) {kernelBuffers = buffers}
-            src = Buffer "src" ReadOnly TF32 16 (ELit (LU32 64))
-            out8 = Buffer "out" ReadWrite TF32 8 (ELit (LU32 64))
+            src = Buffer "src" ReadOnly TF32 16 (ELit (LU32 64)) False
+            out8 = Buffer "out" ReadWrite TF32 8 (ELit (LU32 64)) False
         packed [src] [SLoadPack ["a", "b", "c", "d"] TF32 "src" (lu 1)] @?= []
         map
           (.findingMessage)
@@ -191,7 +191,7 @@ tests =
           @?= [Packs, Packs]
     , testCase "packs: to threadgroup arrays, as wide as a lane loads, of the array's type" $ do
         let tg body = checkIR (targetCaps @T32) (base body) {kernelTgArrays = [TgArray "t" TF32 64]}
-        tg [STgStorePack "t" (lu 1) (map f32 [1, 2, 3, 4]), STgStorePack "t" (lu 3) (map f32 [1, 2])] @?= []
+        tg [SIf RDivergent (EBin Eq (EBuiltin ThreadInGroup) (lu 0)) [STgStorePack "t" (lu 1) (map f32 [1, 2, 3, 4]), STgStorePack "t" (lu 3) (map f32 [1, 2])] []] @?= []
         map (.findingRule) (tg [STgStorePack "t" (lu 0) (map f32 [1 .. 8])]) @?= [Packs, Packs]
         map (.findingMessage) (tg [STgStorePack "t" (lu 0) [f32 1, ELit (LU32 2)], STgStorePack "u" (lu 0) [f32 1, f32 2]])
           @?= ["A value stored to t is u32, not f32.", "No threadgroup array u."]
@@ -201,7 +201,7 @@ tests =
           (findings [SFragVar "f" TF32, SFragVar "h" TBF16, SFragConvert "f" "h", SFragConvert "h" "f"])
           @?= ["The fragment h converted into is not of f32."]
     , testCase "packs: of no elements, asked no alignment" $ do
-        let src = Buffer "src" ReadOnly TF32 16 (ELit (LU32 64))
+        let src = Buffer "src" ReadOnly TF32 16 (ELit (LU32 64)) False
         [f.findingMessage | f <- checkIR (targetCaps @T32) (base [SLoadPack [] TF32 "src" (lu 0)]) {kernelBuffers = [src]}, f.findingRule == Packs]
           @?= ["A pack needs at least two elements.", "Pack of 0 elements of 4 B = 0 B, which is not a power of two.", "Pack of 0 elements of 4 B = 0 B from a buffer aligned to 16 B: a pack of no bytes has nothing to align."]
     , testCase "packs: typing" $
@@ -210,7 +210,7 @@ tests =
           ( checkIR
               (targetCaps @T32)
               (base [SLoadPack ["a", "b"] TU32 "src" (lu 0), SStorePack "src" (lu 0) [f32 1, ELit (LU32 2)]])
-                { kernelBuffers = [Buffer "src" ReadOnly TF32 16 (ELit (LU32 64))]
+                { kernelBuffers = [Buffer "src" ReadOnly TF32 16 (ELit (LU32 64)) False]
                 }
           )
           @?= [ "A pack of u32 loaded from src, a buffer of f32."
@@ -219,7 +219,7 @@ tests =
               ]
     , testCase "packs: as uniform as their index, from a buffer nobody writes" $ do
         let uniformIf = SIf RUniform (EBin Lt (EVar "a") (f32 1)) [] []
-            withSource acc = (base [SLoadPack ["a", "b"] TF32 "src" (lu 0), uniformIf]) {kernelBuffers = [Buffer "src" acc TF32 16 (ELit (LU32 64))]}
+            withSource acc = (base [SLoadPack ["a", "b"] TF32 "src" (lu 0), uniformIf]) {kernelBuffers = [Buffer "src" acc TF32 16 (ELit (LU32 64)) False]}
         checkIR (targetCaps @T32) (withSource ReadOnly) @?= []
         map (.findingRule) (checkIR (targetCaps @T32) (withSource ReadWrite)) @?= [Uniformity]
     , testCase "fragments: an index the same in every lane of the SIMD group" $
@@ -258,12 +258,12 @@ tests =
           (.findingRule)
           ( checkIR
               (targetCaps @T32)
-              (base []) {kernelBuffers = [Buffer ("b" <> showT i) ReadOnly TF32 16 (ELit (LU32 1)) | i <- [1 .. 32 :: Int]]}
+              (base []) {kernelBuffers = [Buffer ("b" <> showT i) ReadOnly TF32 16 (ELit (LU32 1)) False | i <- [1 .. 32 :: Int]]}
           )
           @?= [Buffers]
     , testCase "alignments: a power of two, at least 16 B and the element size" $ do
         let aligned buffers tables = map (.findingMessage) (checkIR (targetCaps @T32) (base []) {kernelBuffers = buffers, kernelTables = tables})
-            buf n t align = Buffer n ReadOnly t align (ELit (LU32 64))
+            buf n t align = Buffer n ReadOnly t align (ELit (LU32 64)) False
             tab n t align = Table n t align (ELit (LU32 4)) (ELit (LU32 64))
         aligned [buf "a" TF32 16, buf "b" TU8 32, buf "c" TBF16 4096] [tab "t" TBF16 16] @?= []
         aligned [buf "a" TF32 0, buf "b" TF32 8, buf "c" TBF16 24, buf "d" TU8 1] [tab "t" TBF16 4]
@@ -398,7 +398,7 @@ base body =
     , kernelSimdWidth = 32
     , kernelGroups = ELit (LU32 1)
     , kernelParams = []
-    , kernelBuffers = [Buffer "out" ReadWrite TF32 16 (ELit (LU32 64))]
+    , kernelBuffers = [Buffer "out" ReadWrite TF32 16 (ELit (LU32 64)) False]
     , kernelTables = []
     , kernelTgArrays = []
     , kernelBody = body

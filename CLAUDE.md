@@ -117,6 +117,9 @@ nix fmt && git diff --exit-code &&
     (`AllThreads`), SIMD-group operations and barriers (`simdBarrier`)
     every lane (`Converged`), loads
     and stores the right access; each refusal has its own message.
+    `apart` declares that the threadgroups touch disjoint elements of a
+    buffer where one stores to it, as the launch's data keeps (rows at
+    distinct positions, routes to distinct experts).
     Locals are named by the author (`let_`, `var`) and stay named.
     Buffers carry their target, for the pack rule: `loadPack` and
     `storePack` move a `Pack` of consecutive elements at once, indexed in
@@ -146,7 +149,27 @@ nix fmt && git diff --exit-code &&
     pass of every loop counted, as a reduction's result is; any other
     divergent), the regions of barriers, SIMD-group operations and
     fragments (whose indices and strides must be SIMD-uniform), the
-    resources, the packs, and fragments of types the target multiplies.
+    resources, the packs, and fragments of types the target multiplies;
+    then, on a kernel that passes all of those, the hazards
+    (`FuryKernel.Check.Hazard`): no two threads touch one element of
+    memory unordered while one of them stores to it. A barrier orders
+    threadgroup memory, a SIMD-group barrier its group's lanes, and
+    nothing orders device memory between threads, but the threadgroups of
+    a buffer declared `apart` are the launch's to keep apart. Each pair of
+    accesses that could race is a system of affine constraints over both
+    threads, their loops, the dimensions and their branches' conditions,
+    solved in the integers (`FuryKernel.Check.Affine`, the Omega test, with
+    a row-major index taken apart digit by digit first); what the check
+    can't rule out is a finding. Where a uniform loop's passes hold
+    different numbers of barriers, a pair inside it is checked in one pass
+    of it, where both threads see the same barriers, and in two, apart by
+    at least the barriers between them. In such a pass, what both threads
+    compute from the same values is the same, and so is a local the
+    divergence analysis finds uniform; a minimum or a maximum is either
+    operand; and a uniform branch whose sides' barriers differ leaves at
+    least those after each access on its side. Indices are taken as
+    computed without wrapping around, which the bounds check of a later
+    stage verifies.
     A finding carries its place (`findingLocation`): its kernel, and the
     ifs and loops around what it is about.
   - `FuryKernel.Check.Launch`: launch sizes over the dimensions' legal
@@ -205,19 +228,22 @@ nix fmt && git diff --exit-code &&
     kernel in JSON (format `furykernel-manifest`, version 1, with the
     target it was checked for; `FuryKernel.Json`: deterministic writing,
     and reading of integer-only JSON with unique keys).
-    The launch contract (ranges, extents, tables' sizes) is outside the
-    hash: `checkOverrides` lets overrides replace a kernel when each has its
-    ABI and its dimensions as dimensions, together they take every legal
+    The launch contract (ranges, extents, tables' sizes, `apart`) is outside
+    the hash: `checkOverrides` lets overrides replace a kernel when each has
+    its ABI and its dimensions as dimensions, together they take every legal
     value of them, and where one takes the kernel's values its extents and
-    tables' sizes are no larger.
+    tables' sizes are no larger and its buffers `apart` only where the
+    kernel's are.
   - `FuryKernel.Variant`: variant spaces. A family declares its axes (the
     choices that change how its kernels compute, as rows, threads, pack
     width and split-K; marked when they decide a reduction's order), its
     shape classes and which of their dimensions are batch sizes.
     `enumerate` prunes every point of a class by legality (the family's
-    builder and the gate), divisibility, parallelism (at least two
-    threadgroups per core of a measured `Profile`) and duplicates (the
-    same IR), and names what is left `family_class_x_axiskey`.
+    builder and the gate's rules but the hazard check), divisibility,
+    parallelism (at least two threadgroups per core of a measured
+    `Profile`), duplicates (the same IR as a kept point) and last the
+    hazard check (`checkStaged`), run once for each kernel left, and names
+    what is left `family_class_x_axiskey`.
     A launch's fewest threadgroups are the grid's least value over the
     dimensions' legal values.
   - `FuryKernel.Selection`: the committed choice of one variant per
@@ -355,6 +381,16 @@ nix fmt && git diff --exit-code &&
   GEMM of tiles (`Test.FuryKernel.TileTest`), partial tiles included,
   against f64, a row's bits the same whatever the rows with it and
   whatever the tile's shape and step.
+  Races (`Test.FuryKernel.HazardTest`): kernels that race through
+  threadgroup and device memory, fragments and SIMD groups, refused by the
+  hazard check with their messages; the library's reductions and tiles
+  pass it and fail it without their barriers, and so do passes over a
+  staged array of as many blocks as loaded, which fail it a barrier short
+  or with their store in a block; a store and a load kept apart by a value
+  per pass, a local a search finds, a branch's barrier or a minimum pass
+  it, and their near misses fail it; a buffer declared `apart` passes
+  stores at loaded places, still checked within a threadgroup.
+  The Omega test against brute force (`Test.FuryKernel.AffineTest`).
   The CPU target's Rust, golden; `checks.cpu` holds it to the
   interpreter's bits and refusals (a dimension out of its range or off
   its multiple). Programs: the gate, the evaluator on small cases

@@ -7,6 +7,7 @@ import Control.Applicative ((<|>))
 import Hedgehog.Internal.Property (Skip (SkipNothing))
 import Hedgehog.Internal.Seed qualified as Seed
 import Test.FuryKernel.AbiTest qualified as AbiTest
+import Test.FuryKernel.AffineTest qualified as AffineTest
 import Test.FuryKernel.BuildTest qualified as BuildTest
 import Test.FuryKernel.CheckTest qualified as CheckTest
 import Test.FuryKernel.ConstraintTest qualified as ConstraintTest
@@ -14,6 +15,7 @@ import Test.FuryKernel.CpuTest qualified as CpuTest
 import Test.FuryKernel.EmitRustTest qualified as EmitRustTest
 import Test.FuryKernel.FragmentTest qualified as FragmentTest
 import Test.FuryKernel.GemvTest qualified as GemvTest
+import Test.FuryKernel.HazardTest qualified as HazardTest
 import Test.FuryKernel.InterpTest qualified as InterpTest
 import Test.FuryKernel.JsonTest qualified as JsonTest
 import Test.FuryKernel.NumericsTest qualified as NumericsTest
@@ -38,7 +40,9 @@ main =
       , ConstraintTest.tests
       , BuildTest.tests
       , CheckTest.tests
+      , AffineTest.tests
       , InterpTest.tests
+      , HazardTest.tests
       , FragmentTest.tests
       , TileTest.tests
       , ReduceTest.tests

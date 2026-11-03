@@ -56,13 +56,14 @@ kernelManifest c =
       , ("extent", JString (renderExpr t.tableBindingExtent))
       ]
   buffer b =
-    JObject
+    JObject $
       [ ("name", JString b.bindingName)
       , ("access", JString (access b.bindingAccess))
       , ("type", JString (scalarTypeName b.bindingType))
       , ("align", JInt (toInteger b.bindingAlign))
       , ("extent", JString (renderExpr b.bindingExtent))
       ]
+        <> [("apart", JBool True) | b.bindingApart]
   field f =
     JObject $
       [ ("name", JString f.fieldName)

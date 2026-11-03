@@ -12,10 +12,10 @@ kernel must have the same ABI, and the Rust that runtimes' generators emit
 asserts at compile time that both sides come from the same one. Launch
 geometry (threads, grid) is the backend's choice and outside the hash.
 
-The launch contract (the dimensions' ranges, the extents and the tables'
-sizes) is outside the hash too: 'checkOverrides' decides whether overrides
-may replace a kernel, their contracts together at least as permissive as
-its.
+The launch contract (the dimensions' ranges, the extents, the tables'
+sizes, the buffers apart) is outside the hash too: 'checkOverrides'
+decides whether overrides may replace a kernel, their contracts together
+at least as permissive as its.
 
 The hashes are FNV-1a over a canonical text, which is simple to recompute
 anywhere and is no security measure.
@@ -59,6 +59,10 @@ data Binding = Binding
   {- ^ Elements the kernel may touch, over the dimensions: a contract the
   launch checks, outside the hash.
   -}
+  , bindingApart :: Bool
+  {- ^ Whether the threadgroups touch disjoint elements where one stores: a
+  contract the launch's data keeps, outside the hash.
+  -}
   }
   deriving stock (Eq, Show)
 
@@ -100,7 +104,7 @@ abiOf k = abi {abiHash = fnv1a64 (abiDescription abi)}
  where
   abi =
     Abi
-      { abiBuffers = [Binding b.bufName b.bufAccess b.bufType b.bufAlign b.bufExtent | b <- k.kernelBuffers]
+      { abiBuffers = [Binding b.bufName b.bufAccess b.bufType b.bufAlign b.bufExtent b.bufApart | b <- k.kernelBuffers]
       , abiTables = [TableBinding t.tableName t.tableType t.tableAlign t.tableEntries t.tableExtent | t <- k.kernelTables]
       , abiParams = fields
       , abiParamsSize = roundUp alignment end
@@ -141,8 +145,8 @@ abiDescription a =
 when they may. Each must have the kernel's ABI and take its dimensions as
 dimensions; together they must take every legal value of them; and where
 one takes the kernel's values, its buffers' extents and its tables' sizes
-must be no larger than the kernel's, since its launches keep only the
-kernel's contract.
+must be no larger than the kernel's and its buffers apart only where the
+kernel's are, since its launches keep only the kernel's contract.
 -}
 checkOverrides :: Checked t -> [Checked t] -> [Finding]
 checkOverrides kernel overrides
@@ -195,6 +199,11 @@ checkOverrides kernel overrides
               <> larger o box ("extent of each entry of table " <> c.tableName) c.tableExtent t.tableExtent
           | (t, c) <- zip k.kernelTables o.kernelTables
           ]
+        <> [ Finding Overrides ("The override " <> o.kernelName <> " declares " <> c.bufName <> " apart, and " <> k.kernelName <> " doesn't.")
+           | (b, c) <- zip k.kernelBuffers o.kernelBuffers
+           , c.bufApart
+           , not b.bufApart
+           ]
   larger o box what oe ke = case (launchSize (Map.keysSet box) oe, launchSize (Map.keysSet box) ke) of
     (Just a, Just b) ->
       let theirs = "The override " <> o.kernelName <> "'s " <> what <> ", " <> sizeText a <> ","
