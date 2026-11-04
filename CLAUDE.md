@@ -69,8 +69,8 @@ nix fmt && git diff --exit-code &&
   (`nix fmt` and `checks.treefmt`).
 - `.gitlab-ci.yml`: GitLab CI on x86_64-linux runners. `checks` runs
   `nix flake check --all-systems`, which builds x86_64-linux's checks;
-  `publish-github`, on master once those passed, pushes master to the public
-  GitHub repository.
+  `publish-github`, on master once those passed, pushes master, and the
+  tags it holds, to the public GitHub repository.
 
 ## Conventions
 
