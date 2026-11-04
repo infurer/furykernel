@@ -9,5 +9,5 @@ module TableUnderAligned (oops) where
 import FuryKernel.Build
 import FuryKernel.Type (BF16)
 
-oops :: Sig t (Tab t 4 BF16)
+oops :: Sig t (Tab t ReadOnly 4 BF16)
 oops = table @4 @BF16 "experts" 4 64

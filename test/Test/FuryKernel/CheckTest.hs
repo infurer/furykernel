@@ -217,6 +217,17 @@ tests =
               , "A store to the read-only buffer src."
               , "A value stored to src is u32, not f32."
               ]
+    , testCase "tables: stores through them only where the kernel writes through them, of their type; loads from them uniform only where it doesn't" $ do
+        let via acc body = checkIR (targetCaps @T32) (base body) {kernelTables = [Table "t" acc TF32 16 (lu 4) (lu 64) False False]}
+            store' = SStoreVia "t" (lu 1) (lu 2) (f32 3)
+            uniformIf = SIf RUniform (EBin Lt (ELoadVia "t" (lu 0) (lu 0)) (f32 1)) [] []
+        -- Every thread stores to one element: a race, but well typed.
+        map (.findingRule) (via ReadWrite [store']) @?= [Hazards]
+        map (.findingMessage) (via ReadOnly [store', SStoreVia "t" (lu 0) (f32 0) (ELit (LU32 1))])
+          @?= ["A store through the read-only table t.", "The index into table t is f32, not u32.", "A store through the read-only table t.", "The value stored through t is u32, not f32."]
+        map (.findingMessage) (via WriteOnly [SLet "a" TF32 (ELoadVia "t" (lu 0) (lu 0))]) @?= ["A load through the write-only table t."]
+        via ReadOnly [uniformIf] @?= []
+        map (.findingRule) (via ReadWrite [uniformIf]) @?= [Uniformity]
     , testCase "packs: as uniform as their index, from a buffer nobody writes" $ do
         let uniformIf = SIf RUniform (EBin Lt (EVar "a") (f32 1)) [] []
             withSource acc = (base [SLoadPack ["a", "b"] TF32 "src" (lu 0), uniformIf]) {kernelBuffers = [Buffer "src" acc TF32 16 (ELit (LU32 64)) False]}
@@ -225,6 +236,12 @@ tests =
     , testCase "fragments: an index the same in every lane of the SIMD group" $
         findings [SFragVar "f" TF32, SFragLoad "f" (FDevice "out") (u32 SimdLane) (lu 8) False]
           @?= [Finding Uniformity "The fragment f's index or stride differs across the lanes of a SIMD group."]
+    , testCase "fragments through a table: its entry the same in every lane of the SIMD group" $ do
+        let via m = [f.findingMessage | f <- checkIR (targetCaps @T32) (base [SFragVar "f" TF32, m]) {kernelTables = [Table "t" ReadWrite TF32 16 (lu 4) (lu 64) True False]}, f.findingRule == Uniformity]
+            differs = ["The fragment f's table entry differs across the lanes of a SIMD group."]
+        via (SFragLoad "f" (FVia "t" (u32 SimdLane)) (lu 0) (lu 8) False) @?= differs
+        via (SFragStore (FVia "t" (u32 SimdLane)) (lu 0) (lu 8) "f") @?= differs
+        via (SFragStore (FVia "t" (lu 1)) (lu 0) (lu 8) "f") @?= []
     , testCase "a product's result is its accumulator or another fragment, never one it multiplies" $
         findings [SFragVar "a" TF32, SFragVar "b" TF32, SFragMma "a" "a" "b" "a"]
           @?= [Finding Typing "The product into a multiplies a too: only its accumulator may be its result."]
@@ -264,7 +281,7 @@ tests =
     , testCase "alignments: a power of two, at least 16 B and the element size" $ do
         let aligned buffers tables = map (.findingMessage) (checkIR (targetCaps @T32) (base []) {kernelBuffers = buffers, kernelTables = tables})
             buf n t align = Buffer n ReadOnly t align (ELit (LU32 64)) False
-            tab n t align = Table n t align (ELit (LU32 4)) (ELit (LU32 64))
+            tab n t align = Table n ReadOnly t align (ELit (LU32 4)) (ELit (LU32 64)) False False
         aligned [buf "a" TF32 16, buf "b" TU8 32, buf "c" TBF16 4096] [tab "t" TBF16 16] @?= []
         aligned [buf "a" TF32 0, buf "b" TF32 8, buf "c" TBF16 24, buf "d" TU8 1] [tab "t" TBF16 4]
           @?= [ "Buffer a: an alignment of 0 B, which is not a power of two."
@@ -376,7 +393,7 @@ tests =
         messages
           (base [])
             { kernelParams = [Param "m" TU32 (Dim (DimRange 1 16 1)), Param "n" TU32 (Dim (DimRange 1 16 1))]
-            , kernelTables = [Table "t" TF32 16 (dimM .-. dimN) (lu 4)]
+            , kernelTables = [Table "t" ReadOnly TF32 16 (dimM .-. dimN) (lu 4) False False]
             }
           @?= ["The number of entries of table t, m - n, leaves u32 at m = 1, n = 2: m - n is -1."]
     , testCase "launch sizes: from the least legal value up, exact where a dimension occurs twice" $ do

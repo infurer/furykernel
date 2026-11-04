@@ -69,12 +69,23 @@ data Binding = Binding
 -- | A table of addresses: what its entries point at, and how many there are.
 data TableBinding = TableBinding
   { tableBindingName :: Name
+  , tableBindingAccess :: Access
+  -- ^ In the hash where the kernel writes through it.
   , tableBindingType :: ScalarType
   , tableBindingAlign :: Natural
   , tableBindingEntries :: Expr
   -- ^ A contract the launch checks, outside the hash.
   , tableBindingExtent :: Expr
   -- ^ Elements of each entry's array the kernel may touch, outside the hash.
+  , tableBindingDistinct :: Bool
+  {- ^ Whether no two entries point into one array: a contract the engine
+  keeps, outside the hash.
+  -}
+  , tableBindingApart :: Bool
+  {- ^ Whether the threadgroups touch disjoint elements of the entries'
+  arrays where one stores: a contract the launch's data keeps, outside the
+  hash.
+  -}
   }
   deriving stock (Eq, Show)
 
@@ -105,7 +116,7 @@ abiOf k = abi {abiHash = fnv1a64 (abiDescription abi)}
   abi =
     Abi
       { abiBuffers = [Binding b.bufName b.bufAccess b.bufType b.bufAlign b.bufExtent b.bufApart | b <- k.kernelBuffers]
-      , abiTables = [TableBinding t.tableName t.tableType t.tableAlign t.tableEntries t.tableExtent | t <- k.kernelTables]
+      , abiTables = [TableBinding t.tableName t.tableAccess t.tableType t.tableAlign t.tableEntries t.tableExtent t.tableDistinct t.tableApart | t <- k.kernelTables]
       , abiParams = fields
       , abiParamsSize = roundUp alignment end
       , abiHash = 0
@@ -129,7 +140,16 @@ abiDescription a =
       <> [ "buffer " <> b.bindingName <> " " <> access b.bindingAccess <> " " <> scalarTypeName b.bindingType <> " align " <> showT b.bindingAlign
          | b <- a.abiBuffers
          ]
-      <> ["table " <> t.tableBindingName <> " " <> scalarTypeName t.tableBindingType <> " align " <> showT t.tableBindingAlign | t <- a.abiTables]
+      -- A read-only table's line names no access.
+      <> [ "table "
+             <> t.tableBindingName
+             <> (if t.tableBindingAccess == ReadOnly then "" else " " <> access t.tableBindingAccess)
+             <> " "
+             <> scalarTypeName t.tableBindingType
+             <> " align "
+             <> showT t.tableBindingAlign
+         | t <- a.abiTables
+         ]
       <> ["param " <> f.fieldName <> " " <> scalarTypeName f.fieldType <> " at " <> showT f.fieldOffset | f <- a.abiParams]
       <> ["params size " <> showT a.abiParamsSize]
  where
@@ -145,8 +165,9 @@ abiDescription a =
 when they may. Each must have the kernel's ABI and take its dimensions as
 dimensions; together they must take every legal value of them; and where
 one takes the kernel's values, its buffers' extents and its tables' sizes
-must be no larger than the kernel's and its buffers apart only where the
-kernel's are, since its launches keep only the kernel's contract.
+must be no larger than the kernel's, its buffers and tables apart and its
+tables' entries distinct only where the kernel's are, since its launches
+keep only the kernel's contract.
 -}
 checkOverrides :: Checked t -> [Checked t] -> [Finding]
 checkOverrides kernel overrides
@@ -203,6 +224,12 @@ checkOverrides kernel overrides
            | (b, c) <- zip k.kernelBuffers o.kernelBuffers
            , c.bufApart
            , not b.bufApart
+           ]
+        <> [ Finding Overrides ("The override " <> o.kernelName <> " declares table " <> c.tableName <> " " <> what <> ", and " <> k.kernelName <> " doesn't.")
+           | (t, c) <- zip k.kernelTables o.kernelTables
+           , (what, theirs, ours) <- [("apart", c.tableApart, t.tableApart), ("distinct", c.tableDistinct, t.tableDistinct)]
+           , theirs
+           , not ours
            ]
   larger o box what oe ke = case (launchSize (Map.keysSet box) oe, launchSize (Map.keysSet box) ke) of
     (Just a, Just b) ->

@@ -1,6 +1,6 @@
 -- SPDX-FileCopyrightText: 2026 Mika Tammi
 -- SPDX-License-Identifier: BSD-3-Clause
--- EXPECT: This buffer is write-only: declare it ReadWrite to load from it.
+-- EXPECT: This buffer or table is write-only: declare it ReadWrite to load from it.
 {-# LANGUAGE GHC2024 #-}
 
 module LoadFromWriteOnly (oops) where

@@ -47,14 +47,18 @@ kernelManifest c =
  where
   k = checkedIR c
   abi = abiOf k
+  -- Access, distinct and apart are listed where a table declares them.
   table t =
-    JObject
+    JObject $
       [ ("name", JString t.tableBindingName)
       , ("type", JString (scalarTypeName t.tableBindingType))
       , ("align", JInt (toInteger t.tableBindingAlign))
       , ("entries", JString (renderExpr t.tableBindingEntries))
       , ("extent", JString (renderExpr t.tableBindingExtent))
       ]
+        <> [("access", JString (access t.tableBindingAccess)) | t.tableBindingAccess /= ReadOnly]
+        <> [("distinct", JBool True) | t.tableBindingDistinct]
+        <> [("apart", JBool True) | t.tableBindingApart]
   buffer b =
     JObject $
       [ ("name", JString b.bindingName)

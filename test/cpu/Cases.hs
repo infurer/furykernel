@@ -39,14 +39,14 @@ import FuryKernel.Cpu (Cpu, cpu)
 import FuryKernel.Emit.Rust (dimRangeText, rustIdent, rustLaunchExpr, rustParamsStruct, rustScalarType)
 import FuryKernel.IR (Expr (..), Literal (..))
 import FuryKernel.IR qualified as IR
-import FuryKernel.Interp (RunError (..), Value (..), launch, run, withSeed, withTables)
+import FuryKernel.Interp (RunError (..), Value (..), launch, run, runWithTables, withSeed, withTables)
 import FuryKernel.Numerics (narrowBF16, narrowF16, widenF16)
 import GHC.Float (castFloatToWord32, castWord32ToFloat)
 import GHC.TypeNats (KnownNat)
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (getArgs)
 import Test.FuryKernel.Gemv (GemvShape (..), GemvVariant (..), gemv)
-import Test.FuryKernel.Kernels (rmsnorm, scale, scalePacked)
+import Test.FuryKernel.Kernels (rmsnorm, scale, scalePacked, throughBlocks)
 
 ------------------------------------------------------------------------------
 -- Cases
@@ -85,6 +85,17 @@ cases =
   , Case "scale_packed" (checked "scale_packed" (scalePacked @Cpu)) [Inputs [("packs", u 37), ("s", VF32 (-1.3))] [("x", bf16s 5 296), ("y", bf16Zeros 296)] []] []
   , simdSumsCase
   , narrowingsCase
+  , -- Four entries of a table of 2^30 bound, each 2^14 elements: 2^44 in all.
+    Case
+      "through_blocks"
+      (checked "through_blocks" (throughBlocks @Cpu True))
+      [ Inputs
+          [("entries", u (2 ^ (30 :: Int)))]
+          [("ids", map VU32 [3, 7, 1000, 4000]), ("x", f32s 70 256), ("y", zeros 256)]
+          [("blocks", [if e `elem` [3, 7, 1000, 4000] then f32s (71 + fromIntegral e) 16384 else [] | e <- [0 .. 4000 :: Word32]])]
+      ]
+      []
+  , Case "gemm_via" (checked "gemm_via" gemmVia) [Inputs [("k", u 32)] [] [("ab", [[], bf16s 36 512, bf16s 37 512]), ("cs", [[], zeros 256])]] []
   ]
     <> zipWith gemvCase [0 :: Int ..] gemvs
     <> [ gemmCase "gemm_bf16" (checked "gemm_bf16" (gemm @BF16)) (bf16s 30) (bf16s 31)
@@ -161,6 +172,29 @@ gemm = kernel "gemm" $ do
       fragLoadT fb b (col0 * k + p * 8) k
       fragMma acc fa fb acc
     fragStore c (row0 * 16 + col0) 16 acc
+
+{- | 'gemm' in bf16, A and B the arrays of entries 1 and 2 of a table, loaded
+through it, and C entry 1's of another, stored through it.
+-}
+gemmVia :: Kernel Cpu
+gemmVia = kernel "gemm_via" $ do
+  k <- dim "k" (DimRange 8 256 8)
+  ab <- table @16 @BF16 "ab" 3 (16 * k)
+  cs <- tableOf @WriteOnly @16 @Float "cs" 2 256
+  distinct cs
+  threads @128
+  groups 1
+  pure . pure $ do
+    row0 <- let_ "row0" ((simdGroupIndex `quotE` 2) * 8)
+    col0 <- let_ "col0" ((simdGroupIndex `remE` 2) * 8)
+    acc <- fragment @Float "acc"
+    fa <- fragment @BF16 "fa"
+    fb <- fragment @BF16 "fb"
+    forU "p" 0 (k `quotE` 8) $ \p -> do
+      fragLoadVia fa ab 1 (row0 * k + p * 8) k
+      fragLoadViaT fb ab 2 (col0 * k + p * 8) k
+      fragMma acc fa fb acc
+    fragStoreVia cs 1 (row0 * 16 + col0) 16 acc
 
 -- | 'gemm' in bf16 with B's tiles staged in threadgroup memory and loaded from there transposed.
 staged :: Kernel Cpu
@@ -892,11 +926,16 @@ main = do
       let file f = root <> "/" <> T.unpack dir <> "/" <> f
       BS.writeFile (file "params.bin") (paramBytes (abiOf k) inp.inParams)
       forM_ inp.inBuffers $ \(n, vs) -> BS.writeFile (file ("in_" <> T.unpack n <> ".bin")) (bytes vs)
+      -- A table's bound entries only: one given no elements is unbound.
       forM_ inp.inTables $ \(n, es) -> forM_ (zip [0 :: Int ..] es) $ \(j, vs) ->
-        BS.writeFile (file ("tbl_" <> T.unpack n <> "_" <> show j <> ".bin")) (bytes vs)
-      case run c.caseKernel (withTables (Map.fromList inp.inTables) (withSeed 7 (launch (Map.fromList inp.inParams) (Map.fromList inp.inBuffers)))) of
+        if null vs then pure () else BS.writeFile (file ("tbl_" <> T.unpack n <> "_" <> show j <> ".bin")) (bytes vs)
+      case runWithTables c.caseKernel (withTables (Map.fromList inp.inTables) (withSeed 7 (launch (Map.fromList inp.inParams) (Map.fromList inp.inBuffers)))) of
         Left e -> error (T.unpack name <> ": the interpreter: " <> show e)
-        Right out -> forM_ (Map.toList out) $ \(n, vs) -> BS.writeFile (file ("out_" <> T.unpack n <> ".bin")) (bytes vs)
+        Right (out, tabs) -> do
+          forM_ (Map.toList out) $ \(n, vs) -> BS.writeFile (file ("out_" <> T.unpack n <> ".bin")) (bytes vs)
+          forM_ [(n, es) | t <- k.kernelTables, t.tableAccess /= IR.ReadOnly, let { n = t.tableName }, Just es <- [Map.lookup n tabs]] $ \(n, es) ->
+            forM_ (zip [0 :: Int ..] es) $ \(j, vs) ->
+              if null vs then pure () else BS.writeFile (file ("out_tbl_" <> T.unpack n <> "_" <> show j <> ".bin")) (bytes vs)
       pure (runFunction c k name dir inp)
   refused <- forM refusals $ \r -> forM (zip [0 :: Int ..] r.refusalRuns) $ \(i, inp) -> do
     let c = r.refusalCase
@@ -922,9 +961,17 @@ runFunction c k name dir inp =
       <> [ "    let " <> mutable b <> rustVar b.bufName <> ": Vec<" <> rustScalarType b.bufType <> "> = load(\"" <> dir <> "/in_" <> b.bufName <> ".bin\");"
          | b <- k.kernelBuffers
          ]
+      -- A table's entries, those unbound empty; mutable slices of them
+      -- where the kernel writes through it.
       <> concat
-        [ [ "    let " <> rustVar t.tableName <> "_entries: Vec<Vec<" <> rustScalarType t.tableType <> ">> = (0.." <> tshow (length entries) <> ").map(|j| load(&format!(\"" <> dir <> "/tbl_" <> t.tableName <> "_{j}.bin\"))).collect();"
-          , "    let " <> rustVar t.tableName <> ": Vec<&[" <> rustScalarType t.tableType <> "]> = " <> rustVar t.tableName <> "_entries.iter().map(Vec::as_slice).collect();"
+        [ [ "    let mut " <> rustVar t.tableName <> "_entries: Vec<Vec<" <> rustScalarType t.tableType <> ">> = (0.." <> tshow (length entries) <> ").map(|_| Vec::new()).collect();"
+          , "    let fk_bound: &[usize] = &[" <> T.intercalate ", " (map tshow (boundOf entries)) <> "];"
+          , "    for &j in fk_bound {"
+          , "        " <> rustVar t.tableName <> "_entries[j] = load(&format!(\"" <> dir <> "/tbl_" <> t.tableName <> "_{j}.bin\"));"
+          , "    }"
+          , if t.tableAccess == IR.ReadOnly
+              then "    let " <> rustVar t.tableName <> ": Vec<&[" <> rustScalarType t.tableType <> "]> = " <> rustVar t.tableName <> "_entries.iter().map(Vec::as_slice).collect();"
+              else "    let mut " <> rustVar t.tableName <> ": Vec<&mut [" <> rustScalarType t.tableType <> "]> = " <> rustVar t.tableName <> "_entries.iter_mut().map(Vec::as_mut_slice).collect();"
           ]
         | t <- k.kernelTables
         , let entries = fromMaybe [] (lookup t.tableName inp.inTables)
@@ -936,14 +983,20 @@ runFunction c k name dir inp =
          | b <- k.kernelBuffers
          , b.bufAccess /= IR.ReadOnly
          ]
-      <> [ "    bad += size(\"" <> name <> "\", \"" <> what <> "\", crate::launch::" <> c.caseId <> "::" <> what <> "(" <> T.intercalate ", " [tshow v | v <- dimValues e] <> "), " <> tshow (evalSize e) <> ");"
+      <> [ "    bad += compare(\"" <> name <> "\", \"" <> t.tableName <> "[" <> tshow j <> "]\", " <> how t.tableName <> ", &" <> rustVar t.tableName <> "[" <> tshow j <> "][..], &load::<" <> rustScalarType t.tableType <> ">(\"" <> dir <> "/out_tbl_" <> t.tableName <> "_" <> tshow j <> ".bin\"));"
+         | t <- k.kernelTables
+         , t.tableAccess /= IR.ReadOnly
+         , j <- boundOf (fromMaybe [] (lookup t.tableName inp.inTables))
+         ]
+      <> [ "    bad += size(\"" <> name <> "\", \"" <> what <> "\", crate::launch::" <> c.caseId <> "::" <> what <> "(" <> T.intercalate ", " [grouped v | v <- dimValues e] <> "), " <> grouped (evalSize e) <> ");"
          | (what, e) <- launchSizes k
          ]
       <> ["    bad", "}"]
   )
  where
   mutable b = if b.bufAccess == IR.ReadOnly then "" else "mut "
-  arguments = ["&p"] <> [(if b.bufAccess == IR.ReadOnly then "&" else "&mut ") <> rustVar b.bufName | b <- k.kernelBuffers] <> ["&" <> rustVar t.tableName | t <- k.kernelTables]
+  arguments = ["&p"] <> [(if b.bufAccess == IR.ReadOnly then "&" else "&mut ") <> rustVar b.bufName | b <- k.kernelBuffers] <> [(if t.tableAccess == IR.ReadOnly then "&" else "&mut ") <> rustVar t.tableName | t <- k.kernelTables]
+  boundOf es = [j | (j, vs) <- zip [0 :: Int ..] es, not (null vs)]
   how n = if n `elem` c.caseByClass then "Compare::NanClass" else "Compare::Bits"
   dims = Map.fromList [(n, w) | (n, VU32 w) <- inp.inParams]
   dimValues e = [Map.findWithDefault 0 d dims | d <- dimsOf e]
@@ -1048,6 +1101,10 @@ rustVar n = "v_" <> n
 
 tshow :: (Show a) => a -> Text
 tshow = T.pack . show
+
+-- | Digits in groups of three, as clippy wants long literals written.
+grouped :: (Show a) => a -> Text
+grouped = T.reverse . T.intercalate "_" . T.chunksOf 3 . T.reverse . T.pack . show
 
 paramBytes :: Abi -> [(Name, Value)] -> BS.ByteString
 paramBytes abi ps =

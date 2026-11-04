@@ -34,7 +34,14 @@ What the model makes explicit:
   stop the run. A threadgroup barrier orders the threadgroup memory of
   what came before it against what comes after, a SIMD-group barrier does
   so for its group's lanes, and nothing orders device memory between
-  threads. A fragment operation is its SIMD group's lanes together.
+  threads. A fragment operation is its SIMD group's lanes together;
+* tables' entries as arrays of their own, or, as the launch gives them,
+  as another entry's ('withSameAs'): a table that declares its entries
+  distinct refuses such a launch, and through one that doesn't, two
+  entries' touches meet in the array they share. An entry the launch gives
+  no array (an empty one, or none past the last given) is unbound, so a
+  table of more entries than memory holds takes the few a launch uses;
+  touching an unbound one is an error.
 
 The threadgroups run one after another, in an order drawn from the seed;
 within one, the lanes run in lockstep, every lane evaluating a statement
@@ -48,10 +55,13 @@ module FuryKernel.Interp (
   launch,
   withSeed,
   withTables,
+  withSameAs,
   RunError (..),
   Who (..),
   run,
   runIR,
+  runWithTables,
+  runIRWithTables,
 ) where
 
 import Control.Monad (forM, forM_, unless, when)
@@ -102,20 +112,21 @@ valueType = \case
   VBool _ -> TBool
 
 {- | What a launch is given: the parameter struct, every buffer, the seed of
-the stores' order, and per table the arrays its entries point at. Made by
-'launch' and the setters after it, which what a launch gains later leaves
-as they are.
+the stores' order, per table the arrays its entries point at, and per
+table the entries given as another's array. Made by 'launch' and the
+setters after it, which what a launch gains later leaves as they are.
 -}
 data Launch = Launch
   { launchParams :: Map Name Value
   , launchBuffers :: Map Name [Value]
   , launchSeed :: Word64
   , launchTables :: Map Name [[Value]]
+  , launchSameAs :: Map Name [(Int, Int)]
   }
 
 -- | A launch of these parameters and buffers: seed 0, no tables.
 launch :: Map Name Value -> Map Name [Value] -> Launch
-launch params buffers = Launch params buffers 0 Map.empty
+launch params buffers = Launch params buffers 0 Map.empty Map.empty
 
 -- | The launch, the order of its stores drawn from this seed.
 withSeed :: Word64 -> Launch -> Launch
@@ -124,6 +135,12 @@ withSeed seed l = l {launchSeed = seed}
 -- | The launch, per table the arrays its entries point at.
 withTables :: Map Name [[Value]] -> Launch -> Launch
 withTables tables l = l {launchTables = tables}
+
+{- | The launch, per table the entries given as another's array: @(e, f)@,
+entry @e@ points at entry @f@'s array, its own values unused.
+-}
+withSameAs :: Map Name [(Int, Int)] -> Launch -> Launch
+withSameAs sameAs l = l {launchSameAs = sameAs}
 
 {- | What stops a run. More may come: match those you expect and leave the
 rest to a catch-all.
@@ -142,8 +159,13 @@ data RunError
     OutOfBounds Name Integer Int
   | -- | A dimension outside its declared range or off its multiple: name, value, range.
     DimOutOfRange Name Word32 DimRange
-  | -- | A table with fewer entries than the kernel declares: name, entries, given.
-    ShortTable Name Int Int
+  | -- | A touch through an entry the launch gives no array: table, entry.
+    UnboundEntry Name Int
+  | {- | Two entries of a table that declares its entries distinct given one
+    array, or an entry given as one that has none of its own: the table,
+    the entries.
+    -}
+    SharedEntries Name Int Int
   | UninitializedRead Name Int
   | DivideByZero
   | -- | A launch size of IR the gate refuses that leaves u32 at a step: the step, and its value.
@@ -175,14 +197,22 @@ data Who
 
 -- | Runs a kernel; returns every buffer as it is afterwards.
 run :: forall t. (Target t) => Checked t -> Launch -> Either RunError (Map Name [Value])
-run checked = runIR (targetCaps @t) (checkedIR checked)
+run checked = fmap fst . runWithTables checked
+
+-- | 'run', returning every table's entries too, each as its array is afterwards.
+runWithTables :: forall t. (Target t) => Checked t -> Launch -> Either RunError (Map Name [Value], Map Name [[Value]])
+runWithTables checked = runIRWithTables (targetCaps @t) (checkedIR checked)
 
 {- | Runs the IR of a kernel the gate need not have passed, on a target
 with these limits, such as one the hazard check refuses: the
 interpreter's own errors still hold.
 -}
 runIR :: TargetCaps -> IR.Kernel -> Launch -> Either RunError (Map Name [Value])
-runIR caps k supplied = runST (runExceptT (execute caps k supplied))
+runIR caps k = fmap fst . runIRWithTables caps k
+
+-- | 'runIR', returning every table's entries too.
+runIRWithTables :: TargetCaps -> IR.Kernel -> Launch -> Either RunError (Map Name [Value], Map Name [[Value]])
+runIRWithTables caps k supplied = runST (runExceptT (execute caps k supplied))
 
 type M s = ExceptT RunError (ST s)
 
@@ -191,11 +221,16 @@ data Env s = Env
   , envKernel :: IR.Kernel
   , envParams :: Map Name Value
   , envBuffers :: Map Name (STArray s Int Value)
-  , envTables :: Map Name [STArray s Int Value]
+  , envTables :: Map Name (Int, Map Int (STArray s Int Value))
+  -- ^ Of each table, its declared entries and the arrays its bound ones point at.
   , envSeed :: Word64
   , envStoreCount :: STRef s Word64
   , envMarks :: Map Name (STArray s Int Marks)
   -- ^ Who touched each element of the buffers the kernel stores to.
+  , envTableMarks :: Map Name (Map Int (Int, STArray s Int Marks))
+  {- ^ Of each table the kernel writes through, per entry: the entry whose
+  array it is, and who touched each element of it.
+  -}
   }
 
 -- | Per threadgroup: the locals as lane vectors, the threadgroup arrays.
@@ -221,7 +256,7 @@ data Mark = Mark
 -- | An element's last store, and the loads since.
 data Marks = Marks (Maybe Mark) [Mark]
 
-execute :: forall s. TargetCaps -> IR.Kernel -> Launch -> M s (Map Name [Value])
+execute :: forall s. TargetCaps -> IR.Kernel -> Launch -> M s (Map Name [Value], Map Name [[Value]])
 execute caps k supplied = do
   params <- forM k.kernelParams $ \p -> case Map.lookup p.paramName supplied.launchParams of
     Nothing -> throwE (MissingParam p.paramName)
@@ -237,7 +272,7 @@ execute caps k supplied = do
   let paramMap = Map.fromList params
   -- Each buffer as far as its declared extent, the rest of what the launch
   -- gives kept aside, untouched; each table as far as its declared entries,
-  -- each entry as far as its declared extent.
+  -- each entry as far as its declared extent, or another entry's array.
   buffers <- forM k.kernelBuffers $ \b -> case Map.lookup b.bufName supplied.launchBuffers of
     Nothing -> throwE (MissingBuffer b.bufName)
     Just vs -> do
@@ -251,17 +286,34 @@ execute caps k supplied = do
     Just entries -> do
       count <- fromIntegral <$> hostU32 paramMap t.tableEntries
       extent <- fromIntegral <$> hostU32 paramMap t.tableExtent
-      when (length entries < count) $ throwE (ShortTable t.tableName count (length entries))
-      arrays <- forM (take count entries) $ \vs -> do
+      let sameAs = Map.fromList [(e, f) | (e, f) <- Map.findWithDefault [] t.tableName supplied.launchSameAs, e < count, e /= f]
+          given = Map.fromList [(e, vs) | (e, vs) <- zip [0 ..] (take count entries), not (null vs), Map.notMember e sameAs]
+      owned <- forM (Map.toList given) $ \(e, vs) -> do
         forM_ vs $ \v -> when (valueType v /= t.tableType) $ throwE (WrongType t.tableName t.tableType (valueType v))
         when (length vs < extent) $ throwE (ShortBuffer t.tableName extent (length vs))
-        lift (newListArray (0, extent - 1) (take extent vs))
-      pure (t.tableName, arrays)
+        (e,) . (,drop extent vs) <$> lift (newListArray (0, extent - 1) (take extent vs))
+      -- An entry given as another's takes that one's array: never where
+      -- the table declares its entries distinct.
+      let ownedMap = Map.fromList owned
+      aliases <- forM (Map.toList sameAs) $ \(e, f) -> case Map.lookup f ownedMap of
+        Just (arr, rest)
+          | not t.tableDistinct -> pure (e, (f, arr, rest))
+        _ -> throwE (SharedEntries t.tableName e f)
+      let arrays = Map.fromList ([(e, (e, arr, rest)) | (e, (arr, rest)) <- owned] <> aliases)
+      pure (t.tableName, (arrays, count, entries))
   counter <- lift (newSTRef 0)
   marks <- forM [(b.bufName, arr) | b <- k.kernelBuffers, b.bufAccess /= ReadOnly, (n, (arr, _)) <- buffers, n == b.bufName] $ \(n, arr) -> do
     (lo, hi) <- lift (getBounds arr)
     (n,) <$> lift (newArray (lo, hi) (Marks Nothing []))
-  let env = Env caps k paramMap (Map.fromList [(n, arr) | (n, (arr, _)) <- buffers]) (Map.fromList tables) supplied.launchSeed counter (Map.fromList marks)
+  -- Marks for each array a writable table's entries point at, shared where
+  -- they share one.
+  tableMarks <- forM [(t.tableName, arrays) | t <- k.kernelTables, t.tableAccess /= ReadOnly, (n, (arrays, _, _)) <- tables, n == t.tableName] $ \(n, arrays) -> do
+    own <- forM [(e, arr) | (e, (owner, arr, _)) <- Map.toList arrays, e == owner] $ \(e, arr) -> do
+      (lo, hi) <- lift (getBounds arr)
+      (e,) <$> lift (newArray (lo, hi) (Marks Nothing []))
+    let ownMap = Map.fromList own
+    pure (n, Map.fromList [(e, (owner, m)) | (e, (owner, _, _)) <- Map.toList arrays, Just m <- [Map.lookup owner ownMap]])
+  let env = Env caps k paramMap (Map.fromList [(n, arr) | (n, (arr, _)) <- buffers]) (Map.fromList [(n, (count, Map.map (\(_, arr, _) -> arr) arrays)) | (n, (arrays, count, _)) <- tables]) supplied.launchSeed counter (Map.fromList marks) (Map.fromList tableMarks)
       w = fromIntegral caps.capSimdWidth
       simds = (fromIntegral k.kernelThreads + w - 1) `div` w
   groups <- hostU32 paramMap k.kernelGroups
@@ -275,7 +327,13 @@ execute caps k supplied = do
     simdEpochs <- lift (newArray (0, max 0 (simds - 1)) 0)
     let grp = Group g locals (Map.fromList (map fst tg)) (Map.fromList (map snd tg)) epoch simdEpochs
     block env grp (allLanes k) k.kernelBody
-  forM (Map.fromList buffers) $ \(arr, rest) -> (<> rest) . elems <$> lift (freeze' arr)
+  outBuffers <- forM (Map.fromList buffers) $ \(arr, rest) -> (<> rest) . elems <$> lift (freeze' arr)
+  -- Each entry as its array is afterwards, the unbound ones as given.
+  outTables <- forM (Map.fromList tables) $ \(arrays, count, entries) ->
+    forM (zip [0 ..] entries) $ \(e, vs) -> case Map.lookup e arrays of
+      Just (_, arr, rest) | e < count -> (<> rest) . elems <$> lift (freeze' arr)
+      _ -> pure vs
+  pure (outBuffers, outTables)
  where
   freeze' :: STArray s Int Value -> ST s (Array Int Value)
   freeze' = unsafeFreeze
@@ -330,6 +388,14 @@ stmt env grp active s = unless (null active) $ case s of
       checkBounds b arr ix
       touch env grp True b ix (Thread grp.groupIndex l) True ("the store to " <> b <> "[" <> renderExpr i <> "]")
       lift (writeArray arr (fromIntegral ix) $! v)
+  SStoreVia t e i v -> do
+    writes <- forM active $ \l -> (,,,) l <$> (eval env grp l e >>= u32) <*> (eval env grp l i >>= index) <*> eval env grp l v
+    landing <- shuffle writes
+    forM_ landing $ \(l, entry, ix, x) -> do
+      arr <- tableEntry env t (VU32 entry)
+      checkBounds t arr ix
+      touchVia env grp t entry ix (Thread grp.groupIndex l) True ("the store through " <> t <> "[" <> renderExpr e <> "][" <> renderExpr i <> "]")
+      lift (writeArray arr (fromIntegral ix) $! x)
   STgStore a i e -> do
     writes <- forM active $ \l -> (l,,) <$> (eval env grp l i >>= index) <*> eval env grp l e
     arr <- maybe (throwE (Internal ("threadgroup array " <> a))) pure (Map.lookup a grp.groupTg)
@@ -353,10 +419,12 @@ stmt env grp active s = unless (null active) $ case s of
   SLoadPackVia ns _ t e i -> do
     let width = toInteger (length ns)
     packs <- forM active $ \l -> do
-      arr <- tableEntry env t =<< eval env grp l e
+      entry <- eval env grp l e >>= u32
+      arr <- tableEntry env t (VU32 entry)
       j <- eval env grp l i >>= index
       forM [j * width .. j * width + width - 1] $ \ix -> do
         checkBounds t arr ix
+        touchVia env grp t entry ix (Thread grp.groupIndex l) False ("the pack loaded through " <> t <> "[" <> renderExpr e <> "] at " <> renderExpr i)
         lift (readArray arr (fromIntegral ix))
     forM_ (zip ns (transpose packs)) $ \(n, vs) -> do
       local' <- fresh n
@@ -442,20 +510,22 @@ stmt env grp active s = unless (null active) $ case s of
   SFragLoad n m i st tr -> simdGroups n $ \g lane -> do
     base <- eval env grp lane i >>= index
     stride <- eval env grp lane st >>= index
+    entry <- entryOf lane m
     arr <- fragment n
     forM_ [(r, c) | r <- [0 .. 7], c <- [0 .. 7]] $ \(r, c) -> do
       let ix = base + (if tr then c * stride + r else r * stride + c)
-      v <- fragMemoryRead m ix
-      touchFragment m ix g False ("the fragment loaded from " <> memoryName m <> " at " <> renderExpr i)
+      v <- fragMemoryRead m entry ix
+      touchFragment m entry ix g False ("the fragment loaded from " <> memoryName m <> " at " <> renderExpr i)
       lift (writeArray arr (g * 64 + fromIntegral (r * 8 + c)) $! v)
   SFragStore m i st n -> simdGroups n $ \g lane -> do
     base <- eval env grp lane i >>= index
     stride <- eval env grp lane st >>= index
+    entry <- entryOf lane m
     arr <- fragment n
     forM_ [(r, c) | r <- [0 .. 7], c <- [0 .. 7]] $ \(r, c) -> do
       v <- lift (readArray arr (g * 64 + fromIntegral (r * 8 + c)))
-      fragMemoryWrite m (base + r * stride + c) v
-      touchFragment m (base + r * stride + c) g True ("the fragment stored to " <> memoryName m <> " at " <> renderExpr i)
+      fragMemoryWrite m entry (base + r * stride + c) v
+      touchFragment m entry (base + r * stride + c) g True ("the fragment stored to " <> memoryName m <> " at " <> renderExpr i)
   SFragScaleRows f a i -> simdGroups f $ \g lane -> do
     base <- eval env grp lane i >>= index
     arr <- maybe (throwE (Internal ("threadgroup array " <> a))) pure (Map.lookup a grp.groupTg)
@@ -485,12 +555,18 @@ stmt env grp active s = unless (null active) $ case s of
     fd <- fragment d
     forM_ results $ \(e, v) -> lift (writeArray fd (g * 64 + e) $! VF32 v)
  where
-  touchFragment m ix g store what = case m of
+  touchFragment m entry ix g store what = case m of
     FDevice b -> touch env grp True b ix (Lanes grp.groupIndex g) store what
     FThreadgroup a -> touch env grp False a ix (Lanes grp.groupIndex g) store what
+    FVia t _ -> touchVia env grp t entry ix (Lanes grp.groupIndex g) store what
   memoryName = \case
     FDevice b -> b
     FThreadgroup a -> a
+    FVia t e -> t <> "[" <> renderExpr e <> "]"
+  -- The entry a fragment's memory goes through, from the group's first lane.
+  entryOf lane = \case
+    FVia _ e -> eval env grp lane e >>= u32
+    _ -> pure 0
   -- A fragment operation, once per SIMD group with any lane active: every
   -- lane of it must be, and the group's first lane gives the addresses.
   simdGroups :: Name -> (Int -> Int -> M s ()) -> M s ()
@@ -524,7 +600,7 @@ stmt env grp active s = unless (null active) $ case s of
     VBF16 b -> pure (widenBF16 b)
     VF16 h -> pure (widenF16 h)
     v -> throwE (Internal ("a fragment element " <> T.pack (show v)))
-  fragMemoryRead m ix = case m of
+  fragMemoryRead m entry ix = case m of
     FDevice b -> do
       arr <- maybe (throwE (MissingBuffer b)) pure (Map.lookup b env.envBuffers)
       checkBounds b arr ix
@@ -533,7 +609,11 @@ stmt env grp active s = unless (null active) $ case s of
       arr <- maybe (throwE (Internal ("threadgroup array " <> a))) pure (Map.lookup a grp.groupTg)
       checkBounds a arr ix
       lift (readArray arr (fromIntegral ix)) >>= maybe (throwE (UninitializedRead a (fromIntegral ix))) pure
-  fragMemoryWrite m ix v = case m of
+    FVia t _ -> do
+      arr <- tableEntry env t (VU32 entry)
+      checkBounds t arr ix
+      lift (readArray arr (fromIntegral ix))
+  fragMemoryWrite m entry ix v = case m of
     FDevice b -> do
       arr <- maybe (throwE (MissingBuffer b)) pure (Map.lookup b env.envBuffers)
       checkBounds b arr ix
@@ -542,6 +622,10 @@ stmt env grp active s = unless (null active) $ case s of
       arr <- maybe (throwE (Internal ("threadgroup array " <> a))) pure (Map.lookup a grp.groupTg)
       checkBounds a arr ix
       lift (writeArray arr (fromIntegral ix) $! Just $! v)
+    FVia t _ -> do
+      arr <- tableEntry env t (VU32 entry)
+      checkBounds t arr ix
+      lift (writeArray arr (fromIntegral ix) $! v)
   bindLocal n e = do
     vs <- forM active $ \l -> (l,) <$> eval env grp l e
     arr <- fresh n
@@ -571,8 +655,19 @@ buffer the kernel stores to: a race with an earlier touch it isn't ordered
 after, one of them a store, is an error.
 -}
 touch :: Env s -> Group s -> Bool -> Name -> Integer -> Who -> Bool -> Text -> M s ()
-touch env grp device name ix who store what =
-  case Map.lookup name (if device then env.envMarks else grp.groupMarks) of
+touch env grp device name = touchIn env grp device name (Map.lookup name (if device then env.envMarks else grp.groupMarks))
+
+{- | A touch of element @ix@ through entry @e@ of a table the kernel writes
+through: of the array the entry points at, named for the entry it is.
+-}
+touchVia :: Env s -> Group s -> Name -> Word32 -> Integer -> Who -> Bool -> Text -> M s ()
+touchVia env grp t e = case Map.lookup t env.envTableMarks >>= Map.lookup (fromIntegral e) of
+  Just (owner, marks) -> touchIn env grp True (t <> "[" <> showT owner <> "]") (Just marks)
+  Nothing -> touchIn env grp True t Nothing
+
+touchIn :: Env s -> Group s -> Bool -> Name -> Maybe (STArray s Int Marks) -> Integer -> Who -> Bool -> Text -> M s ()
+touchIn env grp device name marks ix who store what =
+  case marks of
     Nothing -> pure ()
     Just arr -> do
       epoch <- if device then pure 0 else lift (readSTRef grp.groupEpoch)
@@ -606,14 +701,13 @@ touch env grp device name ix who store what =
     | a.markEpoch < b.markEpoch = True
     | otherwise = simdOf a.markWho == simdOf b.markWho && a.markSimd < b.markSimd
 
--- | The array an entry of a table points at.
+-- | The array an entry of a table points at: past the declared entries, or unbound, an error.
 tableEntry :: Env s -> Name -> Value -> M s (STArray s Int Value)
 tableEntry env t e = do
   entry <- u32 e
-  arrays <- maybe (throwE (MissingBuffer t)) pure (Map.lookup t env.envTables)
-  case drop (fromIntegral entry) arrays of
-    arr : _ -> pure arr
-    [] -> throwE (OutOfBounds t (toInteger entry) (length arrays))
+  (count, arrays) <- maybe (throwE (MissingBuffer t)) pure (Map.lookup t env.envTables)
+  when (fromIntegral entry >= count) $ throwE (OutOfBounds t (toInteger entry) count)
+  maybe (throwE (UnboundEntry t (fromIntegral entry))) pure (Map.lookup (fromIntegral entry) arrays)
 
 -- | Iterations after which a loop counts as one that never ends.
 maxIterations :: Int
@@ -690,9 +784,11 @@ eval env grp lane = go
       touch env grp True n (toInteger ix) (Thread grp.groupIndex lane) False ("the load of " <> n <> "[" <> renderExpr i <> "]")
       lift (readArray arr (fromIntegral ix))
     ELoadVia n e i -> do
-      arr <- tableEntry env n =<< go e
+      entry <- go e >>= u32
+      arr <- tableEntry env n (VU32 entry)
       ix <- go i >>= u32
       checkBounds n arr (toInteger ix)
+      touchVia env grp n entry (toInteger ix) (Thread grp.groupIndex lane) False ("the load through " <> n <> "[" <> renderExpr e <> "][" <> renderExpr i <> "]")
       lift (readArray arr (fromIntegral ix))
     ETgLoad n i -> do
       ix <- go i >>= u32

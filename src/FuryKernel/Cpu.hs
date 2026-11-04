@@ -34,7 +34,8 @@ where the interpreter refuses the launch.
 What generated code needs: the @half@ crate, its types spelled with their
 paths. A kernel is a function of its parameter struct's bytes, its buffers
 as slices (shared ones read-only, mutable ones written) and its tables as
-slices of the arrays their entries point at, in that order.
+slices of the arrays their entries point at (mutable ones where the kernel
+writes through it, which Rust's borrows keep distinct), in that order.
 -}
 module FuryKernel.Cpu (
   Cpu,
@@ -272,7 +273,9 @@ kernelSource c =
       <> [ rustIdent b.bufName <> ": " <> (if b.bufAccess == ReadOnly then "&[" else "&mut [") <> rustType b.bufType <> "]"
          | b <- k.kernelBuffers
          ]
-      <> [rustIdent t.tableName <> ": &[&[" <> rustType t.tableType <> "]]" | t <- k.kernelTables]
+      <> [ rustIdent t.tableName <> ": " <> (if t.tableAccess == ReadOnly then "&[&[" else "&mut [&mut [") <> rustType t.tableType <> "]]"
+         | t <- k.kernelTables
+         ]
   params = [paramLine f | f <- abi.abiParams]
   paramLine f =
     "let "
@@ -371,6 +374,11 @@ stmt depth = \case
     i' <- ex i
     e' <- ex e
     pure (loop ["let fk_value = " <> e' <> ";", rustIdent b <> "[" <> index i' <> "] = fk_value;"])
+  SStoreVia b e i v -> do
+    e' <- ex e
+    i' <- ex i
+    v' <- ex v
+    pure (loop ["let fk_value = " <> v' <> ";", rustIdent b <> "[" <> index e' <> "][" <> index i' <> "] = fk_value;"])
   STgStore a i e -> do
     i' <- ex i
     e' <- ex e
@@ -499,30 +507,32 @@ stmt depth = \case
   SFragLoad n m i st tr -> do
     i' <- ex i
     st' <- ex st
-    (memory, t) <- fragMemory m
+    (memory, t, entry) <- fragMemory m
     let at = if tr then "fk_c * fk_stride + fk_r" else "fk_r * fk_stride + fk_c"
     pure . simdGroups $
-      [ "let fk_base = " <> index i' <> ";"
-      , "let fk_stride = " <> index st' <> ";"
-      , "for fk_r in 0..8 {"
-      , "    for fk_c in 0..8 {"
-      , "        " <> rustIdent n <> "[fk_simd][fk_r * 8 + fk_c] = " <> widenTo t (memory <> "[fk_base + " <> at <> "]") <> ";"
-      , "    }"
-      , "}"
-      ]
+      entry
+        <> [ "let fk_base = " <> index i' <> ";"
+           , "let fk_stride = " <> index st' <> ";"
+           , "for fk_r in 0..8 {"
+           , "    for fk_c in 0..8 {"
+           , "        " <> rustIdent n <> "[fk_simd][fk_r * 8 + fk_c] = " <> widenTo t (memory <> "[fk_base + " <> at <> "]") <> ";"
+           , "    }"
+           , "}"
+           ]
   SFragStore m i st n -> do
     i' <- ex i
     st' <- ex st
-    (memory, t) <- fragMemory m
+    (memory, t, entry) <- fragMemory m
     pure . simdGroups $
-      [ "let fk_base = " <> index i' <> ";"
-      , "let fk_stride = " <> index st' <> ";"
-      , "for fk_r in 0..8 {"
-      , "    for fk_c in 0..8 {"
-      , "        " <> memory <> "[fk_base + fk_r * fk_stride + fk_c] = " <> narrowTo t (rustIdent n <> "[fk_simd][fk_r * 8 + fk_c]") <> ";"
-      , "    }"
-      , "}"
-      ]
+      entry
+        <> [ "let fk_base = " <> index i' <> ";"
+           , "let fk_stride = " <> index st' <> ";"
+           , "for fk_r in 0..8 {"
+           , "    for fk_c in 0..8 {"
+           , "        " <> memory <> "[fk_base + fk_r * fk_stride + fk_c] = " <> narrowTo t (rustIdent n <> "[fk_simd][fk_r * 8 + fk_c]") <> ";"
+           , "    }"
+           , "}"
+           ]
   SFragScaleRows f a i -> do
     i' <- ex i
     pure . simdGroups $
@@ -579,10 +589,14 @@ stmt depth = \case
          , pad1 <> "}"
          , pad <> "}"
          ]
-  -- A fragment's memory, and its element type.
+  -- A fragment's memory, its element type, and the entry it goes through
+  -- as the group's first lane computes it.
   fragMemory = \case
-    FDevice b -> gets (\e -> (rustIdent b, Map.findWithDefault TF32 b e.envBuffers))
-    FThreadgroup a -> gets (\e -> (rustIdent a, Map.findWithDefault TF32 a e.envArrays))
+    FDevice b -> gets (\e -> (rustIdent b, Map.findWithDefault TF32 b e.envBuffers, []))
+    FThreadgroup a -> gets (\e -> (rustIdent a, Map.findWithDefault TF32 a e.envArrays, []))
+    FVia b e -> do
+      e' <- ex e
+      gets (\env -> (rustIdent b <> "[fk_entry]", Map.findWithDefault TF32 b env.envTables, ["let fk_entry = " <> index e' <> ";"]))
   widenTo t v = case t of
     TBF16 -> "fk_widen_bf16(" <> v <> ")"
     TF16 -> "fk_widen_f16(" <> v <> ")"

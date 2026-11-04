@@ -89,6 +89,9 @@ module FuryKernel.Build (
   buffer,
   apart,
   table,
+  tableOf,
+  distinct,
+  apartVia,
   threads,
   groups,
 
@@ -113,6 +116,7 @@ module FuryKernel.Build (
   load,
   loadVia,
   store,
+  storeVia,
   Pack,
   unpack,
   loadPack,
@@ -132,6 +136,8 @@ module FuryKernel.Build (
   fragment,
   fragLoad,
   fragLoadT,
+  fragLoadVia,
+  fragLoadViaT,
   fragLoadTg,
   fragLoadTgT,
   fragMma,
@@ -139,6 +145,7 @@ module FuryKernel.Build (
   fragScaleRows,
   fragStore,
   fragStoreTg,
+  fragStoreVia,
   whenU,
   whenSimd,
   whenLane,
@@ -617,13 +624,14 @@ type role Buf nominal nominal nominal nominal
 newtype Buf t acc align a = Buf Name
 
 {- | A table of device addresses for target @t@: each entry the start of an
-array of @a@ aligned to @align@ bytes. Kernels only read through tables.
+array of @a@ aligned to @align@ bytes, which the kernel reads, writes or
+both through the entries as @acc@ says.
 -}
-type Tab :: Type -> Nat -> Type -> Type
+type Tab :: Type -> Access -> Nat -> Type -> Type
 
-type role Tab nominal nominal nominal
+type role Tab nominal nominal nominal nominal
 
-newtype Tab t align a = Tab Name
+newtype Tab t acc align a = Tab Name
 
 -- | A u32 dimension of the launch, in the parameter struct.
 dim :: Name -> IR.DimRange -> Sig t (Exp Word32)
@@ -665,7 +673,7 @@ apart :: Buf t acc align a -> Sig t ()
 apart (Buf n) = Sig $ modify' (\b -> b {buffers = fmap (\x -> if x.bufName == n then x {IR.bufApart = True} else x) b.buffers})
 
 {- | @table \@16 \@BF16 "experts" entries extent@: a table of @entries@
-addresses, each of an array of which the kernel may touch @extent@
+addresses, each of an array of which the kernel may read @extent@
 elements, aligned as a buffer is ('AlignOk'). Tables bind after the
 buffers.
 -}
@@ -675,12 +683,41 @@ table ::
   Name ->
   Exp Word32 ->
   Exp Word32 ->
-  Sig t (Tab t align a)
-table n (Exp entries) (Exp extent) = Sig $ do
+  Sig t (Tab t ReadOnly align a)
+table = tableOf @ReadOnly @align @a
+
+{- | @tableOf \@ReadWrite \@16 \@BF16 "k_blocks" entries extent@: 'table',
+the kernel touching the entries' arrays as @acc@ says. One it writes
+through declares its entries 'distinct', and its elements 'apartVia' where
+the launch's data keeps the threadgroups' stores apart.
+-}
+tableOf ::
+  forall acc align a t.
+  (KnownAccess acc, KnownNat align, IsScalar a, AlignOk a align) =>
+  Name ->
+  Exp Word32 ->
+  Exp Word32 ->
+  Sig t (Tab t acc align a)
+tableOf n (Exp entries) (Exp extent) = Sig $ do
   claim n
-  let tb = IR.Table n (scalarType @a) (natVal (Proxy @align)) entries extent
+  let tb = IR.Table n (accessOf @acc) (scalarType @a) (natVal (Proxy @align)) entries extent False False
   modify' (\b -> b {tables = b.tables Seq.|> tb})
   pure (Tab n)
+
+{- | @distinct t@: no two of the table's entries point into one array, as
+the engine keeps (a paged cache's blocks, each allocated on its own). The
+hazard check takes it for stores through two entries, the interpreter
+checks it on every run, and the manifest records it.
+-}
+distinct :: Tab t acc align a -> Sig t ()
+distinct (Tab n) = Sig $ modify' (\b -> b {tables = fmap (\x -> if x.tableName == n then x {IR.tableDistinct = True} else x) b.tables})
+
+{- | @apartVia t@: 'apart' for a table, the threadgroups touching disjoint
+elements of its entries' arrays where one of them stores, as the launch's
+data keeps.
+-}
+apartVia :: Tab t acc align a -> Sig t ()
+apartVia (Tab n) = Sig $ modify' (\b -> b {tables = fmap (\x -> if x.tableName == n then x {IR.tableApart = True} else x) b.tables})
 
 -- | @threads \@256@: threads per threadgroup, checked against @t@ statically.
 threads :: forall n t. (KnownNat n, ThreadsOk t n) => Sig t ()
@@ -768,7 +805,7 @@ instance Readable ReadOnly
 instance Readable ReadWrite
 
 instance
-  (Unsatisfiable ('Text "This buffer is write-only: declare it ReadWrite to load from it.")) =>
+  (Unsatisfiable ('Text "This buffer or table is write-only: declare it ReadWrite to load from it.")) =>
   Readable WriteOnly
 
 type Writable :: Access -> Constraint
@@ -779,7 +816,7 @@ instance Writable WriteOnly
 instance Writable ReadWrite
 
 instance
-  (Unsatisfiable ('Text "This buffer is read-only: declare it ReadWrite to store to it.")) =>
+  (Unsatisfiable ('Text "This buffer or table is read-only: declare it ReadWrite to store to it.")) =>
   Writable ReadOnly
 
 -- | A mutable local.
@@ -813,8 +850,12 @@ load :: (Readable acc) => Buf t acc align a -> Exp Word32 -> Exp a
 load (Buf n) (Exp i) = Exp (IR.ELoad n i)
 
 -- | Element @i@ of the array that entry @e@ of the table points at.
-loadVia :: Tab t align a -> Exp Word32 -> Exp Word32 -> Exp a
+loadVia :: (Readable acc) => Tab t acc align a -> Exp Word32 -> Exp Word32 -> Exp a
 loadVia (Tab n) (Exp e) (Exp i) = Exp (IR.ELoadVia n e i)
+
+-- | Stores element @i@ of the array that entry @e@ of the table points at.
+storeVia :: (Writable acc) => Tab t acc align a -> Exp Word32 -> Exp Word32 -> Exp a -> K r ()
+storeVia (Tab n) (Exp e) (Exp i) (Exp v) = K (emit (IR.SStoreVia n e i v))
 
 store :: (Writable acc) => Buf t acc align a -> Exp Word32 -> Exp a -> K r ()
 store (Buf n) (Exp i) (Exp e) = K (emit (IR.SStore n i e))
@@ -849,10 +890,10 @@ loadPack base (Buf b) (Exp j) = K $ do
 that entry @e@ of the table points at, read at once.
 -}
 loadPackVia ::
-  forall n t align a r.
-  (KnownNat n, IsScalar a, PackOk t n a align) =>
+  forall n t acc align a r.
+  (Readable acc, KnownNat n, IsScalar a, PackOk t n a align) =>
   Name ->
-  Tab t align a ->
+  Tab t acc align a ->
   Exp Word32 ->
   Exp Word32 ->
   K r (Pack n a)
@@ -1044,6 +1085,14 @@ fragLoad (Frag n) (Buf b) (Exp i) (Exp st) = K (emit (IR.SFragLoad n (IR.FDevice
 fragLoadT :: (Converged r, Readable acc) => Frag a -> Buf t acc align a -> Exp Word32 -> Exp Word32 -> K r ()
 fragLoadT (Frag n) (Buf b) (Exp i) (Exp st) = K (emit (IR.SFragLoad n (IR.FDevice b) i st True))
 
+-- | 'fragLoad' from the array that entry @e@ of the table points at.
+fragLoadVia :: (Converged r, Readable acc) => Frag a -> Tab t acc align a -> Exp Word32 -> Exp Word32 -> Exp Word32 -> K r ()
+fragLoadVia (Frag n) (Tab b) (Exp e) (Exp i) (Exp st) = K (emit (IR.SFragLoad n (IR.FVia b e) i st False))
+
+-- | 'fragLoadT' from the array that entry @e@ of the table points at.
+fragLoadViaT :: (Converged r, Readable acc) => Frag a -> Tab t acc align a -> Exp Word32 -> Exp Word32 -> Exp Word32 -> K r ()
+fragLoadViaT (Frag n) (Tab b) (Exp e) (Exp i) (Exp st) = K (emit (IR.SFragLoad n (IR.FVia b e) i st True))
+
 -- | 'fragLoad' from a threadgroup array.
 fragLoadTg :: (Converged r) => Frag a -> TgArr k a -> Exp Word32 -> Exp Word32 -> K r ()
 fragLoadTg (Frag n) (TgArr a) (Exp i) (Exp st) = K (emit (IR.SFragLoad n (IR.FThreadgroup a) i st False))
@@ -1074,6 +1123,10 @@ fragScaleRows (Frag f) (TgArr a) (Exp i) = K (emit (IR.SFragScaleRows f a i))
 -- | Stores a fragment to a buffer: its element @(r, c)@ at @index + r * stride + c@.
 fragStore :: (Converged r, Writable acc) => Buf t acc align a -> Exp Word32 -> Exp Word32 -> Frag a -> K r ()
 fragStore (Buf b) (Exp i) (Exp st) (Frag n) = K (emit (IR.SFragStore (IR.FDevice b) i st n))
+
+-- | 'fragStore' to the array that entry @e@ of the table points at.
+fragStoreVia :: (Converged r, Writable acc) => Tab t acc align a -> Exp Word32 -> Exp Word32 -> Exp Word32 -> Frag a -> K r ()
+fragStoreVia (Tab b) (Exp e) (Exp i) (Exp st) (Frag n) = K (emit (IR.SFragStore (IR.FVia b e) i st n))
 
 -- | 'fragStore' to a threadgroup array.
 fragStoreTg :: (Converged r) => TgArr k a -> Exp Word32 -> Exp Word32 -> Frag a -> K r ()

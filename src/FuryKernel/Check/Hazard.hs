@@ -15,6 +15,10 @@ while one of them stores to it.
   loads or stores an element that another one stores. Of a buffer the
   kernel declares apart, the threadgroups' elements are disjoint by the
   launch's data, and only the threads of one threadgroup are checked.
+* Through a table the kernel writes, an element is an entry and an index:
+  where the table declares its entries distinct, two accesses meet only at
+  one entry and one index; where it doesn't, any two may meet. A table
+  declared apart is checked within each threadgroup only, as a buffer is.
 
 Every pair of accesses that could race becomes a system of affine
 constraints over both threads' positions, their loops' counters, the
@@ -43,7 +47,7 @@ module FuryKernel.Check.Hazard (
   checkHazards,
 ) where
 
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Control.Monad.Trans.State.Strict (State, evalState, gets, modify')
 import Data.List (nub, partition)
 import Data.Map.Strict (Map)
@@ -108,7 +112,7 @@ data Term = Term Lin (Map Name Lin) [Con]
 linear :: Lin -> [Con] -> Term
 linear l = Term l Map.empty
 
-data Mem = Tg Name | Dev Name
+data Mem = Tg Name | Dev Name | Via Name
   deriving stock (Eq, Ord, Show)
 
 data Touch = Touch
@@ -116,6 +120,8 @@ data Touch = Touch
   , aStore :: Bool
   , aWhat :: Text
   , aIndex :: Lin
+  , aEntry :: Lin
+  -- ^ The entry of a table it goes through; 0 for a buffer or an array.
   , aProducts :: Map Name Lin
   -- ^ The dimensions the index multiplies, and by what.
   , aCons :: [Con]
@@ -253,7 +259,11 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
     ]
   stored = Set.fromList [a.aMem | a <- accesses, a.aStore]
   -- Each access with the range of its index, where the constraints bound it.
-  indexed = zip [0 :: Int ..] [(a, if Map.null a.aProducts then range (bounds (a.aCons <> position One <> dimensions)) a.aIndex else Nothing) | a <- accesses]
+  -- Through a table of entries that may share arrays, any index may meet.
+  indexed = zip [0 :: Int ..] [(a, if Map.null a.aProducts && not (shared a.aMem) then range (bounds (a.aCons <> position One <> dimensions)) a.aIndex else Nothing) | a <- accesses]
+  shared = \case
+    Via n -> not (Set.member n distinctTables)
+    _ -> False
   pairs =
     [ (x, y)
     | (i, x@(a, sa)) <- indexed
@@ -277,6 +287,10 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
   readOnly = Set.fromList [b.bufName | b <- k.kernelBuffers, b.bufAccess == ReadOnly]
   apartBuffers = Set.fromList [b.bufName | b <- k.kernelBuffers, b.bufApart]
   extents = Map.fromList [(b.bufName, b.bufExtent) | b <- k.kernelBuffers]
+  apartTables = Set.fromList [t.tableName | t <- k.kernelTables, t.tableApart]
+  distinctTables = Set.fromList [t.tableName | t <- k.kernelTables, t.tableDistinct]
+  writableTables = Set.fromList [t.tableName | t <- k.kernelTables, t.tableAccess /= ReadOnly]
+  tableSizes = Map.fromList [(t.tableName, (t.tableEntries, t.tableExtent)) | t <- k.kernelTables]
 
   ------------------------------------------------------------------------
   -- Pairs
@@ -300,14 +314,18 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
 
   common a b =
     let b2 = onTwo b
-     in a.aCons <> b2.aCons <> position One <> position Two <> dimensions <> (if Map.null a.aProducts then inMemory a.aMem a.aIndex else [])
+     in a.aCons <> b2.aCons <> position One <> position Two <> dimensions <> (if Map.null a.aProducts then inMemory a else [])
 
   {- The two indices equal: their affine parts, and for each dimension
   that multiplies something, g times a variable for the dimension times
   d / g, where d is the difference of its multipliers and g their common
   factor, by d's sign: 0 for d = 0, at least the dimension for d ≥ g, at
   most its opposite for d ≤ -g. -}
-  meet a b2 =
+  meet a b2
+    | shared a.aMem = [[]]
+    | otherwise = meetAt a b2
+  -- Through a table of distinct entries, at one entry too.
+  meetAt a b2 =
     let ns = nub (Map.keys a.aProducts <> Map.keys b2.aProducts)
         multiplier x n = Map.findWithDefault (constant 0) n x.aProducts
         difference n = minus (multiplier a n) (multiplier b2 n)
@@ -324,7 +342,8 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
               , [atMost (constant g) d, atMost dn q]
               , [atMost d (constant (negate g)), atMost q (times (-1) dn)]
               ]
-     in [same : concat choice | choice <- mapM signs ns]
+        entry = [equal a.aEntry b2.aEntry | Via _ <- [a.aMem]]
+     in [same : entry <> concat choice | choice <- mapM signs ns]
 
   cases a b =
     let a1 = a
@@ -336,7 +355,7 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
         facts = mapM distinctOrSame [t | t@(q, r, _) <- splits, Set.member q used || Set.member r used]
         base0 = [(m <> concat f, c) | c <- [common a b], m <- meet a1 b2, f <- facts]
         tripped = nub (tripsOf a <> tripsOf b)
-        shared launch =
+        shared' launch =
           [ equal (term (VTrips One l)) (term (VTrips Two l))
           | l <- tripped
           , maybe False (if launch then (.loopLaunch) else (.loopKnown)) (Map.lookup l loops)
@@ -409,18 +428,22 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
                   <> [(base <> sameSimd <> inSimd <> c, context) | Just inSimd <- [simdOrder], c <- lanes]
               | (seeds, context) <- base0
               , (order, simdOrder) <- passes
-              , let base = seeds <> sameGroup <> shared False <> order
+              , let base = seeds <> sameGroup <> shared' False <> order
               ]
-          -- Two threadgroups touch a buffer declared apart at disjoint
-          -- elements, as the launch's data keeps.
-          Dev name ->
+          -- Two threadgroups touch a buffer or a table declared apart at
+          -- disjoint elements, as the launch's data keeps.
+          mem ->
             concat
-              [ (if Set.member name apartBuffers then [] else [(base <> c, context) | c <- distinct (VGroup One)])
+              [ (if declaredApart mem then [] else [(base <> c, context) | c <- distinct (VGroup One)])
                   <> [(base <> sameGroup <> c, context) | c <- distinct (VSimd One)]
                   <> [(base <> sameGroup <> sameSimd <> c, context) | c <- lanes]
               | (seeds, context) <- base0
-              , let base = seeds <> shared True
+              , let base = seeds <> shared' True
               ]
+  declaredApart = \case
+    Dev n -> Set.member n apartBuffers
+    Via n -> Set.member n apartTables
+    Tg _ -> False
 
   position s =
     [ atMost (constant 0) (term (VLane s))
@@ -440,9 +463,18 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
       ]
       <> [atMost (constant 0) (term (VParam n)) | n <- Set.toList scalars]
 
-  inMemory m i = case m of
-    Tg a -> [atMost (constant 0) i] <> [atMost i (constant (c - 1)) | Just c <- [Map.lookup a tgCounts]]
+  inMemory a = case a.aMem of
+    Tg n -> [atMost (constant 0) i] <> [atMost i (constant (c - 1)) | Just c <- [Map.lookup n tgCounts]]
     Dev b -> [atMost (constant 0) i] <> [atMost i (minus e (constant 1)) | Just x <- [Map.lookup b extents], Just e <- [launchTerm x]]
+    Via t ->
+      [atMost (constant 0) i, atMost (constant 0) a.aEntry]
+        <> concat
+          [ [atMost i (minus x (constant 1)) | Just x <- [launchTerm extent]]
+              <> [atMost a.aEntry (minus c (constant 1)) | Just c <- [launchTerm entries]]
+          | Just (entries, extent) <- [Map.lookup t tableSizes]
+          ]
+   where
+    i = a.aIndex
 
   -- A launch size over the dimensions: affine, or nothing known.
   launchTerm = \case
@@ -461,6 +493,7 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
     Finding Hazards $ case a.aMem of
       Tg n -> "Threads may race on the threadgroup array " <> n <> ": " <> both <> " can touch one element between the same barriers."
       Dev n -> "Threads may race on the buffer " <> n <> ": " <> both <> " can touch one element in two threads of the launch."
+      Via n -> "Threads may race through the table " <> n <> ": " <> both <> " can touch one element in two threads of the launch."
    where
     both = if a.aStmt == b.aStmt && a.aWhat == b.aWhat then a.aWhat <> " in two threads" else a.aWhat <> " and " <> b.aWhat
 
@@ -494,6 +527,12 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
         t <- expr ctx i
         element ctx n (Dev b) True ("the store to " <> b <> "[" <> renderExpr i <> "]") 1 t
         pure ctx
+      SStoreVia b e i v -> do
+        mapM_ (loads ctx n) [e, i, v]
+        te <- entryOf ctx e
+        t <- expr ctx i
+        elementVia ctx n b True ("the store through " <> b <> "[" <> renderExpr e <> "][" <> renderExpr i <> "]") 1 te t
+        pure ctx
       STgStore a i e -> do
         mapM_ (loads ctx n) [i, e]
         t <- expr ctx i
@@ -504,7 +543,13 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
         t <- expr ctx i
         element ctx n (Dev b) False ("the pack loaded from " <> b <> " at " <> renderExpr i) (toInteger (length ns)) t
         pure ctx
-      SLoadPackVia _ _ _ e i -> mapM_ (loads ctx n) [e, i] >> pure ctx
+      SLoadPackVia ns _ b e i -> do
+        mapM_ (loads ctx n) [e, i]
+        when (Set.member b writableTables) $ do
+          te <- entryOf ctx e
+          t <- expr ctx i
+          elementVia ctx n b False ("the pack loaded through " <> b <> "[" <> renderExpr e <> "] at " <> renderExpr i) (toInteger (length ns)) te t
+        pure ctx
       SStorePack b i es -> do
         mapM_ (loads ctx n) (i : es)
         t <- expr ctx i
@@ -598,11 +643,11 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
       SFragMma {} -> pure ctx
       SFragConvert _ _ -> pure ctx
       SFragLoad _ m i st tr -> do
-        mapM_ (loads ctx n) [i, st]
+        mapM_ (loads ctx n) ([i, st] <> [e | FVia _ e <- [m]])
         fragment ctx n m False ("the fragment loaded from " <> memName m <> " at " <> renderExpr i) i st tr
         pure ctx
       SFragStore m i st _ -> do
-        mapM_ (loads ctx n) [i, st]
+        mapM_ (loads ctx n) ([i, st] <> [e | FVia _ e <- [m]])
         fragment ctx n m True ("the fragment stored to " <> memName m <> " at " <> renderExpr i) i st False
         pure ctx
       SFragScaleRows _ a i -> do
@@ -616,6 +661,7 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
             , aStore = False
             , aWhat = "the row scales read from " <> a <> " at " <> renderExpr i
             , aIndex = plus base (term r)
+            , aEntry = constant 0
             , aProducts = bp
             , aCons = bc <> digit r 8
             , aEpoch = ctx.cEpoch
@@ -632,12 +678,21 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
   memName = \case
     FDevice b -> b
     FThreadgroup a -> a
+    FVia b e -> b <> "[" <> renderExpr e <> "]"
   memOf = \case
     FDevice b -> Dev b
     FThreadgroup a -> Tg a
+    FVia b _ -> Via b
+
+  -- An entry of a table: its affine form, with what defines it.
+  entryOf ctx e = expr ctx e >>= flat
+
+  -- 'element' through a table, at an entry.
+  elementVia ctx n b store what width' entry = elementAt ctx n (Via b) entry store what width'
 
   -- An access to the elements of a lane's pack, or to one element.
-  element ctx n m store what width' (Term i ip ic) = do
+  element ctx n m = elementAt ctx n m (constant 0, [])
+  elementAt ctx n m (entry, ec) store what width' (Term i ip ic) = do
     p <- freshVar
     record
       ctx
@@ -646,8 +701,9 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
         , aStore = store
         , aWhat = what
         , aIndex = plus (times width' i) (term p)
+        , aEntry = entry
         , aProducts = Map.map (times width') ip
-        , aCons = ic <> digit p width'
+        , aCons = ec <> ic <> digit p width'
         , aEpoch = ctx.cEpoch
         , aSimdEpoch = ctx.cSimdEpoch
         , aWide = False
@@ -664,6 +720,9 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
   fragment ctx n m store what i st tr = do
     Term base bp bc <- expr ctx i
     (stride, sc) <- flat =<< expr ctx st
+    (entry, ec) <- case m of
+      FVia _ e -> entryOf ctx e
+      _ -> pure (constant 0, [])
     r <- freshVar
     c <- freshVar
     let (along, across) = if tr then (c, r) else (r, c)
@@ -675,8 +734,9 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
               , aStore = store
               , aWhat = what
               , aIndex = plus base (plus rowTerm (term across))
+              , aEntry = entry
               , aProducts = bp
-              , aCons = bc <> sc <> digit r 8 <> digit c 8 <> extra
+              , aCons = bc <> sc <> ec <> digit r 8 <> digit c 8 <> extra
               , aEpoch = ctx.cEpoch
               , aSimdEpoch = ctx.cSimdEpoch
               , aWide = True
@@ -715,7 +775,12 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
       loads ctx n i
       t <- expr ctx i
       element ctx n (Tg a) False ("the load of " <> a <> "[" <> renderExpr i <> "]") 1 t
-    ELoadVia _ e i -> mapM_ (loads ctx n) [e, i]
+    ELoadVia b e i -> do
+      mapM_ (loads ctx n) [e, i]
+      when (Set.member b writableTables) $ do
+        te <- entryOf ctx e
+        t <- expr ctx i
+        elementVia ctx n b False ("the load through " <> b <> "[" <> renderExpr e <> "][" <> renderExpr i <> "]") 1 te t
     EUn _ e -> loads ctx n e
     EBin _ x y -> mapM_ (loads ctx n) [x, y]
     ESelect c x y -> mapM_ (loads ctx n) [c, x, y]
@@ -798,7 +863,8 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
         _ -> derived [Term a ap ac, Term b bp bc]
     -- A buffer the kernel never writes holds one value an element.
     ELoad b i | Set.member b readOnly -> expr ctx i >>= derived . pure
-    ELoadVia _ e i -> do
+    -- A table the kernel never writes holds one value an element.
+    ELoadVia b e i | not (Set.member b writableTables) -> do
       te <- expr ctx e
       ti <- expr ctx i
       derived [te, ti]
@@ -1015,7 +1081,7 @@ lowest b x = negate <$> greatest b (times (-1) x)
 
 -- | The loops whose iterations an access's constraints count.
 tripsOf :: Touch -> [Int]
-tripsOf a = nub [l | x <- a.aEpoch : a.aSimdEpoch : a.aIndex : Map.elems a.aProducts <> map body a.aCons, VTrips _ l <- Map.keys (coefficients x)]
+tripsOf a = nub [l | x <- a.aEpoch : a.aSimdEpoch : a.aIndex : a.aEntry : Map.elems a.aProducts <> map body a.aCons, VTrips _ l <- Map.keys (coefficients x)]
  where
   body = \case
     EqualsZero x -> x
@@ -1053,7 +1119,7 @@ relevant seeds rest = seeds <> grow (vars seeds) rest
 
 -- | The variables of an access's index and constraints.
 variablesOf :: Touch -> [Var]
-variablesOf a = nub [v | x <- a.aEpoch : a.aSimdEpoch : a.aIndex : Map.elems a.aProducts <> map body a.aCons, v <- Map.keys (coefficients x)]
+variablesOf a = nub [v | x <- a.aEpoch : a.aSimdEpoch : a.aIndex : a.aEntry : Map.elems a.aProducts <> map body a.aCons, v <- Map.keys (coefficients x)]
  where
   body = \case
     EqualsZero x -> x
@@ -1061,7 +1127,7 @@ variablesOf a = nub [v | x <- a.aEpoch : a.aSimdEpoch : a.aIndex : Map.elems a.a
 
 -- | The unknowns an access shares with every thread of its threadgroup.
 uniformsOf :: Touch -> [Int]
-uniformsOf a = nub [u | x <- a.aEpoch : a.aSimdEpoch : a.aIndex : Map.elems a.aProducts <> map body a.aCons, VUniform _ u <- Map.keys (coefficients x)]
+uniformsOf a = nub [u | x <- a.aEpoch : a.aSimdEpoch : a.aIndex : a.aEntry : Map.elems a.aProducts <> map body a.aCons, VUniform _ u <- Map.keys (coefficients x)]
  where
   body = \case
     EqualsZero x -> x
@@ -1098,6 +1164,7 @@ onTwo :: Touch -> Touch
 onTwo a =
   a
     { aIndex = rename onTwoVar a.aIndex
+    , aEntry = rename onTwoVar a.aEntry
     , aProducts = Map.map (rename onTwoVar) a.aProducts
     , aCons = map conOnTwo a.aCons
     , aEpoch = rename onTwoVar a.aEpoch

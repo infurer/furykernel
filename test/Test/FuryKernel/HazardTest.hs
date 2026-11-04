@@ -11,6 +11,7 @@ module Test.FuryKernel.HazardTest (tests) where
 import Control.Monad (void, when)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Word (Word32)
 import FuryKernel.Build
 import FuryKernel.Check (checkIR)
@@ -24,6 +25,7 @@ import FuryKernel.Target (Target, targetCaps)
 import FuryKernel.Tile (GemmTile (..), gemmTile)
 import FuryKernel.Type (BF16 (..))
 import GHC.TypeNats (KnownNat)
+import Test.FuryKernel.Kernels (throughBlocks, throughBlocksDeclaring)
 import Test.FuryKernel.Targets (T32)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (Assertion, assertBool, assertFailure, testCase, (@?=))
@@ -71,6 +73,13 @@ tests =
         fmap (Map.lookup "y") (runIR (targetCaps @T32) (kernelIR (scatter True)) (launched [] [("places", map VU32 [3, 0, 2, 1]), ("y", zeros 4)] 0))
           @?= Right (Just (map VU32 [1, 3, 2, 0]))
         raced (scatter True) [] [("places", map VU32 [3, 0, 3, 1]), ("y", zeros 4)] "y"
+    , testCase "a table written through: stores at loaded entries pass where its entries are distinct and its elements apart" $ do
+        refused (throughBlocks @T32 True) []
+        hazards (throughBlocksDeclaring @T32 True False) >>= assertBool "distinct entries alone passed stores at loaded entries" . not . null
+        hazards (throughBlocksDeclaring @T32 False True) >>= assertBool "apart elements alone passed stores through entries that may share an array" . not . null
+        hazards (throughBlocks @T32 False) >>= assertBool "a table of no declarations passed" . all (T.isInfixOf "through the table blocks")
+    , testCase "a table written through: the threads of one threadgroup are still checked" $
+        refused (blocksTwice True) ["Threads may race through the table blocks: the store through blocks[e][0u] and the store through blocks[e][0u] can touch one element in two threads of the launch."]
     , testCase "a buffer declared apart: the threads of one threadgroup are still checked" $
         refused (scatterTwice True) ["Threads may race on the buffer y: the store to y[places[@group]] and the store to y[places[@group]] can touch one element in two threads of the launch."]
     , testCase "passes over a stage, each of blocks that load it, then a store over it, pass, and race without their barriers" $
@@ -146,6 +155,10 @@ tests =
 -- | The hazards the gate finds, by their messages.
 refused :: forall t. (Target t) => Kernel t -> [Text] -> Assertion
 refused k want = [f.findingMessage | f <- checkIR (targetCaps @t) (kernelIR k), f.findingRule == Hazards] @?= want
+
+-- | The hazards the gate finds, as their messages.
+hazards :: forall t. (Target t) => Kernel t -> IO [Text]
+hazards k = pure [f.findingMessage | f <- checkIR (targetCaps @t) (kernelIR k), f.findingRule == Hazards]
 
 launched :: [(Name, Value)] -> [(Name, [Value])] -> Word32 -> Launch
 launched ps bs seed = withSeed (fromIntegral seed) (launch (Map.fromList ps) (Map.fromList bs))
@@ -364,6 +377,19 @@ scatter declared = kernel "scatter" $ do
   threads @32
   groups 4
   pure . pure $ whenLane (threadIndex .== 0) (store y (load places groupIndex) groupIndex)
+
+-- | Two threads of each threadgroup store at element 0 of its block, through a table declared distinct and apart.
+blocksTwice :: Bool -> Kernel T32
+blocksTwice declared = kernel "blocks_twice" $ do
+  ids <- buffer @ReadOnly @16 @Word32 "ids" 4
+  blocks <- tableOf @ReadWrite @16 @Word32 "blocks" 4 64
+  when declared (distinct blocks >> apartVia blocks)
+  threads @32
+  groups 4
+  pure . pure $ do
+    e <- let_ "e" (load ids groupIndex)
+    whenLane (threadIndex .== 0) (storeVia blocks e 0 groupIndex)
+    whenLane (threadIndex .== 1) (storeVia blocks e 0 groupIndex)
 
 -- | 'scatter' by two threads of each threadgroup.
 scatterTwice :: Bool -> Kernel T32

@@ -260,11 +260,13 @@ data Region
   deriving stock (Eq, Ord, Show, Enum, Bounded)
 
 {- | Where a fragment is loaded from or stored to: a device buffer or a
-threadgroup array, by name.
+threadgroup array, by name, or the array a table's entry points at.
 -}
 data FragMemory
   = FDevice Name
   | FThreadgroup Name
+  | -- | Table, entry.
+    FVia Name Expr
   deriving stock (Eq, Show)
 
 {- | Reductions across the lanes of a SIMD group, by 'Add', 'Max' and 'Min',
@@ -289,6 +291,8 @@ data Stmt
   | SAssign Name Expr
   | -- | Buffer, index, value.
     SStore Name Expr Expr
+  | -- | Table, entry, index, value: a store into the array an entry points at.
+    SStoreVia Name Expr Expr Expr
   | -- | Threadgroup array, index, value.
     STgStore Name Expr Expr
   | {- | Locals bound to a pack: consecutive elements of a buffer, which a
@@ -388,20 +392,34 @@ data Buffer = Buffer
   }
   deriving stock (Eq, Show)
 
-{- | A table of device addresses, which the kernel only reads through: entry
-@e@ is the start of an array of @tableExtent@ elements of @tableType@,
-aligned to @tableAlign@ bytes. The table itself holds @tableEntries@
-64-bit addresses. Experts' weights are reached this way, wherever the
-engine keeps them.
+{- | A table of device addresses: entry @e@ is the start of an array of
+@tableExtent@ elements of @tableType@, aligned to @tableAlign@ bytes. The
+table itself holds @tableEntries@ 64-bit addresses, which may point
+anywhere: experts' weights wherever the engine keeps them, a paged cache's
+blocks wherever it allocated them. A table the kernel writes through
+declares what the hazard check takes of the launch: its entries distinct,
+no two pointing into one array, and its elements apart, as a buffer's are.
+An entry's array overlaps no buffer of the kernel and no other table's.
 -}
 data Table = Table
   { tableName :: Name
+  , tableAccess :: Access
+  -- ^ What the kernel does through the entries; it only reads the table.
   , tableType :: ScalarType
   , tableAlign :: Natural
   , tableEntries :: Expr
   -- ^ Entries in the table, over the parameters.
   , tableExtent :: Expr
   -- ^ Elements of each entry's array the kernel may touch.
+  , tableDistinct :: Bool
+  {- ^ Whether no two entries point into one array, as the engine keeps:
+  the hazard check takes it, the interpreter checks it.
+  -}
+  , tableApart :: Bool
+  {- ^ Whether the threadgroups touch disjoint elements of the entries'
+  arrays where one of them stores, as the launch's data keeps: the hazard
+  check takes it, the interpreter checks it.
+  -}
   }
   deriving stock (Eq, Show)
 
@@ -496,10 +514,12 @@ renderKernel k =
     ReadOnly -> "read"
     WriteOnly -> "write"
     ReadWrite -> "read_write"
+  -- A read-only table renders without its access.
   table t =
     "  table "
       <> t.tableName
       <> " : "
+      <> (if t.tableAccess == ReadOnly then "" else access t.tableAccess <> " ")
       <> renderExpr t.tableEntries
       <> " x "
       <> scalarTypeName t.tableType
@@ -507,6 +527,8 @@ renderKernel k =
       <> renderExpr t.tableExtent
       <> "] align "
       <> showT t.tableAlign
+      <> (if t.tableDistinct then " distinct" else "")
+      <> (if t.tableApart then " apart" else "")
   tgArray a = "  threadgroup " <> a.tgName <> " : " <> scalarTypeName a.tgType <> "[" <> showT a.tgCount <> "]"
 
 stmt :: Int -> Stmt -> [Text]
@@ -515,6 +537,7 @@ stmt depth = \case
   SVar n t e -> [pad <> "var " <> n <> " : " <> scalarTypeName t <> " = " <> renderExpr e]
   SAssign n e -> [pad <> n <> " = " <> renderExpr e]
   SStore b i e -> [pad <> b <> "[" <> renderExpr i <> "] = " <> renderExpr e]
+  SStoreVia b e i v -> [pad <> b <> "[" <> renderExpr e <> "][" <> renderExpr i <> "] = " <> renderExpr v]
   STgStore a i e -> [pad <> a <> "[" <> renderExpr i <> "] = " <> renderExpr e]
   SLoadPack ns t b i ->
     [ pad
@@ -586,6 +609,7 @@ stmt depth = \case
   memory = \case
     FDevice b -> b
     FThreadgroup a -> "threadgroup " <> a
+    FVia b e -> b <> "[" <> renderExpr e <> "]"
   pad = T.replicate (2 * depth) " "
   region = \case
     RUniform -> "uniform"

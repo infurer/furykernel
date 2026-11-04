@@ -102,8 +102,9 @@ nix fmt && git diff --exit-code &&
     keeps its subnormals, and so do the interpreter and the CPU target.
     Statements record the region the builder declared (uniform,
     SIMD-uniform, divergent); the gate verifies the declarations. Tables
-    of device addresses, bound after the buffers, are read through: each
-    entry the start of an array (an expert's weights), wherever the
+    of device addresses, bound after the buffers, are read through, and
+    written through where their access allows: each entry the start of an
+    array (an expert's weights, a block of a KV cache), wherever the
     runtime keeps it.
     Threadgroup arrays lie in the kernel's layout (`tgLayout`): each aligned
     to 16 B, or its element size if larger, and taking its size rounded up
@@ -126,8 +127,13 @@ nix fmt && git diff --exit-code &&
     packs, so a pack is aligned whenever its buffer is; `tgStorePack`
     writes two or more elements, as wide as a lane loads, to a threadgroup
     array, aligned for it as
-    every threadgroup array is. `table` declares a
-    table, `loadVia` and `loadPackVia` read through one. Fragments are the
+    every threadgroup array is. `table` declares a read-only table and
+    `tableOf` one of any access; `loadVia` and `loadPackVia` read through
+    one, `storeVia` stores through one, `fragLoadVia`, `fragLoadViaT` and
+    `fragStoreVia` move fragments through one. `distinct` declares that
+    no two of a table's entries point into one array, `apartVia` that the
+    threadgroups touch disjoint elements of its arrays where one stores
+    through it. Fragments are the
     8×8 matrices a SIMD group holds together (`fragment`): loaded from
     device or threadgroup memory, plain or transposed (`fragLoad`,
     `fragLoadT`, `fragLoadTg`, `fragLoadTgT`), widened into f32 ones
@@ -155,7 +161,10 @@ nix fmt && git diff --exit-code &&
     memory unordered while one of them stores to it. A barrier orders
     threadgroup memory, a SIMD-group barrier its group's lanes, and
     nothing orders device memory between threads, but the threadgroups of
-    a buffer declared `apart` are the launch's to keep apart. Each pair of
+    a buffer declared `apart` are the launch's to keep apart. Through a
+    table, two accesses meet only at one entry if its entries are declared
+    `distinct`, and at any two otherwise; `apartVia` keeps its
+    threadgroups apart as `apart` does a buffer's. Each pair of
     accesses that could race is a system of affine constraints over both
     threads, their loops, the dimensions and their branches' conditions,
     solved in the integers (`FuryKernel.Check.Affine`, the Omega test, with
@@ -197,12 +206,18 @@ nix fmt && git diff --exit-code &&
     dimensions outside their range, integer division by zero or overflow,
     and races: every element remembers who touched it after which barriers,
     and two threads touching one unordered, by the hazard check's rules,
-    one of them storing, stop the run (`Race`). Threadgroups run in an
-    order drawn from the seed. `runIR` runs IR the gate refused, such as
-    the hazard check's mutants. A fragment product adds each
-    element's eight products to its accumulator in f32, in k order; GPUs
-    may add in another, so kernels with fragments are held to f32
-    accumulation's bound against the interpreter, not to its bits.
+    one of them storing, stop the run (`Race`). A table's entries are
+    bound sparsely (`runWithTables`, which returns what the kernel stored
+    through its writable ones): an entry not bound is an error where it is
+    reached (`UnboundEntry`). A launch is made by `launch` and set by
+    `withSeed`, `withTables` and `withSameAs`, which can point entries into
+    one array, which a table declared `distinct` refuses
+    (`SharedEntries`) and which otherwise share their elements' races.
+    Threadgroups run in an order drawn from the seed. `runIR` runs IR the
+    gate refused, such as the hazard check's mutants. A fragment product
+    adds each element's eight products to its accumulator in f32, in k
+    order; GPUs may add in another, so kernels with fragments are held to
+    f32 accumulation's bound against the interpreter, not to its bits.
   - `FuryKernel.Reduce`: threadgroup reductions (`tgReduceSum` from -0,
     `tgReduceMax` from -inf) from SIMD-group reductions and a scratch array, and
     split-K's combine (`combineSplits`), which adds each output's partials
@@ -274,12 +289,14 @@ nix fmt && git diff --exit-code &&
     model (every local a vector with a lane per thread, each statement run
     for the active lanes in order, branches splitting them), so that
     runtimes without a GPU run the kernels their GPUs run; fragments are
-    64 f32 elements a SIMD group, multiplied as the interpreter does. Its
-    output needs the `half` crate. Rsqrt, exp, log and tanh are
-    binary64's, rounded once, as the interpreter's: to binary16 by a
-    rounding of its own, since the crate's `from_f64` goes through binary32
-    on x86 and keeps only the upper bits in its portable code. An fma is
-    `mul_add` in f32 and goes through binary64 in f16.
+    64 f32 elements a SIMD group, multiplied as the interpreter does. A
+    read-only table is a `&[&[T]]`, a writable one a `&mut [&mut [T]]`,
+    whose entries Rust's borrows keep distinct. Its output needs the
+    `half` crate. Rsqrt, exp, log and tanh are binary64's, rounded once,
+    as the interpreter's: to binary16 by a rounding of its own, since the
+    crate's `from_f64` goes through binary32 on x86 and keeps only the
+    upper bits in its portable code. An fma is `mul_add` in f32 and goes
+    through binary64 in f16.
     It refuses two kernels of one name in a module, and two whose names
     make one Rust type name.
     A kernel asserts its dimensions' ranges and multiples before it
@@ -397,7 +414,11 @@ nix fmt && git diff --exit-code &&
   apart by a value per pass, a local a search finds, a branch's barrier
   or a minimum pass both, and race in their near misses; a buffer
   declared `apart` passes stores at loaded places, still checked within a
-  threadgroup and at run time. The Omega test against brute force
+  threadgroup and at run time, and so does a table written through,
+  declared `distinct` and `apartVia`. The interpreter runs a table of
+  2^30 entries of which four are bound, refuses an unbound entry and
+  entries a `distinct` table shares, and finds the race of two shared
+  entries in an undeclared one. The Omega test against brute force
   (`Test.FuryKernel.AffineTest`).
   The CPU target's Rust, golden; `checks.cpu` holds it to the
   interpreter's bits and refusals (a dimension out of its range or off

@@ -6,8 +6,11 @@ module Test.FuryKernel.Kernels (
   scale,
   scalePacked,
   rmsnorm,
+  throughBlocks,
+  throughBlocksDeclaring,
 ) where
 
+import Control.Monad (when)
 import Data.Word (Word32)
 import FuryKernel.Build
 import FuryKernel.Constraint (PackOk, TgArrayOk, ThreadsOk)
@@ -70,3 +73,29 @@ rmsnorm hidden = kernel "rmsnorm" $ do
         store y (base + j) (narrow @BF16 (widen @Float (load x (base + j)) * scale' * widen @Float (load w j)))
  where
   h = fromIntegral hidden
+
+{- | Through a table of @entries@ blocks of 2^14 floats each, threadgroup g
+of four stores 2 x[64 g + i] at element 16320 + i of block ids[g] and loads
+it back into y. Declared, the table's entries are distinct and its elements
+apart between threadgroups; undeclared, they are neither.
+-}
+throughBlocks :: forall t. (Target t, ThreadsOk t 64) => Bool -> Kernel t
+throughBlocks declared = throughBlocksDeclaring @t declared declared
+
+-- | 'throughBlocks', its entries declared distinct, and its elements apart, as asked.
+throughBlocksDeclaring :: forall t. (Target t, ThreadsOk t 64) => Bool -> Bool -> Kernel t
+throughBlocksDeclaring distinct' apart' = kernel "through_blocks" $ do
+  entries <- dim "entries" (DimRange 1 (2 ^ (30 :: Int)) 1)
+  ids <- buffer @ReadOnly @16 @Word32 "ids" 4
+  x <- buffer @ReadOnly @16 @Float "x" 256
+  y <- buffer @WriteOnly @16 @Float "y" 256
+  blocks <- tableOf @ReadWrite @16 @Float "blocks" entries 16384
+  when distinct' (distinct blocks)
+  when apart' (apartVia blocks)
+  threads @64
+  groups 4
+  pure . pure $ do
+    e <- let_ "e" (load ids groupIndex)
+    at <- let_ "at" (16320 + threadIndex)
+    storeVia blocks e at (load x (groupIndex * 64 + threadIndex) * 2)
+    store y (groupIndex * 64 + threadIndex) (loadVia blocks e at)

@@ -22,7 +22,7 @@ import GHC.Float (castFloatToWord32, castWord32ToFloat, double2Float, float2Doub
 import Hedgehog (Property, forAll, property, (===))
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import Test.FuryKernel.Kernels (scale, scalePacked)
+import Test.FuryKernel.Kernels (scale, scalePacked, throughBlocks)
 import Test.FuryKernel.Run (runOn)
 import Test.FuryKernel.Targets (T16, T32, T64, T8)
 import Test.Tasty (TestTree, testGroup)
@@ -93,6 +93,38 @@ tests =
             go entry = either (Left . show) (\c -> either (Left . show) Right (run c (launchAt entry))) (check (pick @T32))
         go 1 @?= Right (Map.fromList [("y", map VF32 [10, 11, 12, 13, 12, 13])])
         go 3 @?= Left (show (OutOfBounds "arrays" 3 3))
+    , testCase "tables written through: stores land in the entries' arrays, a pool of 2^44 elements bound by four" $ do
+        -- Entries 3, 7, 1000 and 4000 of 2^30 bound, each array 2^14 elements:
+        -- each threadgroup's 64 stores and loads at the end of its entry's.
+        let ids = [3, 7, 1000, 4000]
+            xs = [VF32 (fromIntegral i) | i <- [0 .. 255 :: Int]]
+            given = [if e `elem` ids then replicate 16384 (VF32 0) else [] | e <- [0 .. 4000 :: Word32]]
+            launch' same = withSameAs same (withTables (Map.fromList [("blocks", given)]) (withSeed 5 (launch (Map.fromList [("entries", VU32 (2 ^ (30 :: Int)))]) (Map.fromList [("ids", map VU32 ids), ("x", xs), ("y", replicate 256 (VF32 0))]))))
+            ran same = either (Left . show) (\c -> either (Left . show) Right (runWithTables c (launch' same))) (check (throughBlocks @T32 True))
+        case ran Map.empty of
+          Right (out, tabs) -> do
+            Map.lookup "y" out @?= Just [VF32 (2 * fromIntegral i) | i <- [0 .. 255 :: Int]]
+            let entry e = maybe [] (!! fromIntegral e) (Map.lookup "blocks" tabs)
+            [drop 16320 (entry e) | e <- ids] @?= [[VF32 (2 * fromIntegral (g * 64 + i)) | i <- [0 .. 63 :: Int]] | g <- [0 .. 3]]
+            take 16320 (entry 7) @?= replicate 16320 (VF32 0)
+          Left e -> assertFailure e
+        -- Entry 7 given as entry 3's array, which the table's declaration refuses.
+        ran (Map.fromList [("blocks", [(7, 3)])]) @?= Left (show (SharedEntries "blocks" 7 3))
+        -- An entry the launch gives no array.
+        let unbound = withTables (Map.fromList [("blocks", given)]) (withSeed 5 (launch (Map.fromList [("entries", VU32 (2 ^ (30 :: Int)))]) (Map.fromList [("ids", map VU32 [3, 7, 1000, 4001]), ("x", xs), ("y", replicate 256 (VF32 0))])))
+        either (Left . show) (\c -> either (Left . show) (Right . fst) (runWithTables c unbound)) (check (throughBlocks @T32 True))
+          @?= Left (show (UnboundEntry "blocks" 4001))
+    , testCase "tables written through: entries that share an array meet in it, as the race detector finds" $
+        -- The table declares nothing; entries 3 and 7 share one array, and
+        -- two threadgroups store to one element of it.
+        case check (throughBlocks @T32 False) of
+          Right _ -> assertFailure "the hazard check took stores through entries that may share an array"
+          Left _ ->
+            let given = [if e `elem` [3, 5, 6] then replicate 16384 (VF32 0) else [] | e <- [0 .. 7 :: Word32]]
+                launch' = withSameAs (Map.fromList [("blocks", [(7, 3)])]) (withTables (Map.fromList [("blocks", given)]) (withSeed 5 (launch (Map.fromList [("entries", VU32 8)]) (Map.fromList [("ids", map VU32 [3, 7, 5, 6]), ("x", replicate 256 (VF32 1)), ("y", replicate 256 (VF32 0))]))))
+             in case runIRWithTables (targetCaps @T32) (kernelIR (throughBlocks @T32 False)) launch' of
+                  Left (Race "blocks[3]" _ _ _ _ _) -> pure ()
+                  other -> assertFailure ("no race: " <> show (fmap fst other))
     , testCase "errors instead of undefined behaviour" $ do
         runOn @T32 count [("n", VU32 100)] [("y", replicate 99 (VU32 0))] 0
           @?= Left (ShortBuffer "y" 100 99)

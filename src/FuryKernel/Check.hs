@@ -40,9 +40,11 @@ typed surface or not, and re-check what the types promise:
   ("FuryKernel.Check.Hazard").
 
 A launch binds each of a kernel's buffers to memory of its own, no two of
-them overlapping: the uniformity of what a buffer the kernel never writes
-holds, and the hazard check's accesses, rely on it. Bounds come with the
-bounds check of a later stage.
+them overlapping, and each entry of a table to an array overlapping no
+buffer and no other table's, nor, where the table declares its entries
+distinct, another entry's: the uniformity of what a buffer or a table the
+kernel never writes holds, and the hazard check's accesses, rely on it.
+Bounds come with the bounds check of a later stage.
 -}
 module FuryKernel.Check (
   Checked,
@@ -332,7 +334,9 @@ checkTyping k =
       index ("the entries of table " <> n) e
       index ("table " <> n) i
       case Map.lookup n tables of
-        Just t -> pure (Just t.tableType)
+        Just t -> do
+          when (t.tableAccess == WriteOnly) $ bad ("A load through the write-only table " <> n <> ".")
+          pure (Just t.tableType)
         Nothing -> Nothing <$ bad ("No table " <> n <> ".")
     ELoad n i -> do
       index ("buffer " <> n) i
@@ -400,6 +404,14 @@ checkTyping k =
           when (b.bufAccess == ReadOnly) $ bad ("A store to the read-only buffer " <> n <> ".")
           expect ("The value stored to " <> n) b.bufType e
         Nothing -> bad ("No buffer " <> n <> ".")
+    SStoreVia n e i v -> do
+      index ("the entries of table " <> n) e
+      index ("table " <> n) i
+      case Map.lookup n tables of
+        Just tb -> do
+          when (tb.tableAccess == ReadOnly) $ bad ("A store through the read-only table " <> n <> ".")
+          expect ("The value stored through " <> n) tb.tableType v
+        Nothing -> bad ("No table " <> n <> ".")
     STgStore n i e -> do
       index ("threadgroup array " <> n) i
       case Map.lookup n arrays of
@@ -409,7 +421,8 @@ checkTyping k =
       index ("the entries of table " <> n) e
       index ("table " <> n) i
       case Map.lookup n tables of
-        Just tb ->
+        Just tb -> do
+          when (tb.tableAccess == WriteOnly) $ bad ("A load through the write-only table " <> n <> ".")
           when (tb.tableType /= t) $
             bad ("A pack of " <> scalarTypeName t <> " loaded through " <> n <> ", a table of " <> scalarTypeName tb.tableType <> ".")
         Nothing -> bad ("No table " <> n <> ".")
@@ -502,6 +515,14 @@ checkTyping k =
     FThreadgroup n -> case Map.lookup n arrays of
       Just a -> when (any (/= a.tgType) t) $ bad (what <> " " <> n <> ", an array of " <> scalarTypeName a.tgType <> ".")
       Nothing -> bad ("No threadgroup array " <> n <> ".")
+    FVia n e -> do
+      index ("the entries of table " <> n) e
+      case Map.lookup n tables of
+        Just tb -> do
+          when (reading && tb.tableAccess == WriteOnly) $ bad (what <> " the write-only table " <> n <> ".")
+          when (not reading && tb.tableAccess == ReadOnly) $ bad (what <> " the read-only table " <> n <> ".")
+          when (any (/= tb.tableType) t) $ bad (what <> " " <> n <> ", a table of " <> scalarTypeName tb.tableType <> ".")
+        Nothing -> bad ("No table " <> n <> ".")
 
 -- | The grid and the extents: u32 expressions over parameters and literals.
 interfaceTyping :: IR.Kernel -> [Finding]
@@ -585,8 +606,8 @@ checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
       when (r == D) $
         report place Regions "A SIMD-group barrier where not every lane of the group arrives."
     SFragVar n _ -> fragment n []
-    SFragLoad n _ i st _ -> fragment n [i, st]
-    SFragStore _ i st n -> fragment n [i, st]
+    SFragLoad n m i st _ -> fragment n [i, st] >> entry n m
+    SFragStore m i st n -> fragment n [i, st] >> entry n m
     SFragMma d _ _ _ -> fragment d []
     SFragConvert d _ -> fragment d []
     SFragScaleRows f _ i -> fragment f [i]
@@ -600,6 +621,11 @@ checkUniformity k = execState (walk [] U (epochs k.kernelBody) k.kernelBody) []
         report place Regions ("The fragment operation on " <> n <> " where not every lane of the group is active.")
       when (any ((> S) . uni locals) addresses) $
         report place Uniformity ("The fragment " <> n <> "'s index or stride differs across the lanes of a SIMD group.")
+    -- The entry of a table a fragment's memory goes through, the same in
+    -- every lane.
+    entry n m =
+      when (any ((> S) . uni locals) [e | FVia _ e <- [m]]) $
+        report place Uniformity ("The fragment " <> n <> "'s table entry differs across the lanes of a SIMD group.")
 
   declared place d u what =
     when (u > regionUni d) $
@@ -670,9 +696,11 @@ uniformityIn k stored m = \case
   EFma a b c -> maximum [uni a, uni b, uni c]
   EConvert _ e -> uni e
   ENarrowInt _ _ e -> uni e
-  -- Only a buffer the kernel never writes reads the same in every thread.
-  -- Tables are only read: the same entry and index read the same element.
-  ELoadVia _ e i -> max (uni e) (uni i)
+  -- Only a buffer or a table the kernel never writes reads the same in
+  -- every thread: the same entry and index read the same element.
+  ELoadVia n e i
+    | n `elem` readOnlyTables -> max (uni e) (uni i)
+    | otherwise -> D
   ELoad n i
     | n `elem` readOnly -> uni i
     | otherwise -> D
@@ -684,6 +712,7 @@ uniformityIn k stored m = \case
  where
   uni = uniformityIn k stored m
   readOnly = [b.bufName | b <- k.kernelBuffers, b.bufAccess == ReadOnly]
+  readOnlyTables = [t.tableName | t <- k.kernelTables, t.tableAccess == ReadOnly]
 
 {- | A statement's barrier epoch, for the divergence analysis: the
 threadgroup arrays that some thread may store to between the threadgroup
