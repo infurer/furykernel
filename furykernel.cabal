@@ -1,0 +1,130 @@
+cabal-version: 3.0
+-- SPDX-FileCopyrightText: 2026 Mika Tammi
+-- SPDX-License-Identifier: BSD-3-Clause
+--
+-- The header sits below `cabal-version` because from spec 2.2 on that field
+-- must be the file's first line, not even preceded by a comment.
+name: furykernel
+version: 0.2.0.0
+synopsis: A typed eDSL for GPU compute kernels
+description:
+  FuryKernel is a Haskell eDSL for writing GPU compute kernels. Kernels are
+  built in Haskell, checked against the limits of the hardware they target
+  (threadgroup size and memory, SIMD width, alignment, uniform control flow
+  around barriers), and printed as source for that target by a separate
+  target library. This package is the target-agnostic core.
+
+homepage: https://github.com/infurer/furykernel
+license: BSD-3-Clause
+license-file: LICENSES/BSD-3-Clause.txt
+author: Mika Tammi
+maintainer: mikatammi@gmail.com
+copyright: 2026 Mika Tammi
+category: Compilers/Interpreters
+build-type: Simple
+extra-doc-files: README.md
+tested-with: ghc ==9.12.3
+
+common warnings
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wpartial-fields
+    -Wmissing-export-lists
+
+common extensions
+  default-language: GHC2024
+  default-extensions:
+    OverloadedRecordDot
+    OverloadedStrings
+    StrictData
+    TypeFamilies
+
+library
+  import: warnings, extensions
+  hs-source-dirs: src
+  exposed-modules:
+    FuryKernel
+    FuryKernel.Abi
+    FuryKernel.Backend
+    FuryKernel.Build
+    FuryKernel.Check
+    FuryKernel.Check.Affine
+    FuryKernel.Check.Hazard
+    FuryKernel.Check.Launch
+    FuryKernel.Constraint
+    FuryKernel.Cpu
+    FuryKernel.Emit.Rust
+    FuryKernel.Finding
+    FuryKernel.IR
+    FuryKernel.Interp
+    FuryKernel.Json
+    FuryKernel.Manifest
+    FuryKernel.Numerics
+    FuryKernel.Program
+    FuryKernel.Program.Build
+    FuryKernel.Program.Check
+    FuryKernel.Program.Eval
+    FuryKernel.Program.Graph
+    FuryKernel.Program.Plan
+    FuryKernel.Reduce
+    FuryKernel.Selection
+    FuryKernel.Target
+    FuryKernel.Tile
+    FuryKernel.Type
+    FuryKernel.Variant
+
+  build-depends:
+    array >=0.5 && <0.6,
+    base >=4.21 && <5,
+    bytestring >=0.12 && <0.13,
+    containers >=0.7 && <0.8,
+    text >=2.1 && <2.2,
+    transformers >=0.6 && <0.7,
+
+test-suite furykernel-test
+  import: warnings, extensions
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is: Main.hs
+  other-modules:
+    Test.FuryKernel.AbiTest
+    Test.FuryKernel.AffineTest
+    Test.FuryKernel.BuildTest
+    Test.FuryKernel.CheckTest
+    Test.FuryKernel.ConstraintTest
+    Test.FuryKernel.CpuTest
+    Test.FuryKernel.EmitRustTest
+    Test.FuryKernel.FragmentTest
+    Test.FuryKernel.Gemv
+    Test.FuryKernel.GemvTest
+    Test.FuryKernel.HazardTest
+    Test.FuryKernel.InterpTest
+    Test.FuryKernel.JsonTest
+    Test.FuryKernel.Kernels
+    Test.FuryKernel.NumericsTest
+    Test.FuryKernel.PlanCheck
+    Test.FuryKernel.ProgramTest
+    Test.FuryKernel.ReduceTest
+    Test.FuryKernel.Run
+    Test.FuryKernel.SelectionTest
+    Test.FuryKernel.Targets
+    Test.FuryKernel.TileTest
+    Test.FuryKernel.VariantTest
+
+  ghc-options:
+    -threaded
+    -rtsopts
+    -with-rtsopts=-N
+
+  build-depends:
+    base,
+    containers,
+    furykernel,
+    hedgehog >=1.5 && <1.6,
+    tasty >=1.5 && <1.6,
+    tasty-hedgehog >=1.4 && <1.5,
+    tasty-hunit >=0.10 && <0.11,
+    text,
