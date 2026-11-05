@@ -295,8 +295,11 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
   ------------------------------------------------------------------------
   -- Pairs
 
-  -- A pair whose indices never meet needs no look at the threads.
-  races a b = any solvable (meeting a b) && any picked (cases a b)
+  -- A pair whose indices never meet needs no look at the threads. Its
+  -- meeting systems' equalities are split once, for every system after.
+  races a b =
+    let ms = [splitBy m (relevant m (common a b)) | m <- meet a (onTwo b)]
+     in any solvable (meeting ms a b) && any picked (cases ms a b)
 
   {- A system, and if it has solutions, with each minimum and maximum in it
   one of its operands, in each thread: those only take solutions away. -}
@@ -310,7 +313,7 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
       EqualsZero x -> x
       NonNegative x -> x
 
-  meeting a b = [relevant m (common a b) | m <- meet a (onTwo b)]
+  meeting ms a b = [relevant m (common a b) | m <- ms]
 
   common a b =
     let b2 = onTwo b
@@ -345,7 +348,7 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
         entry = [equal a.aEntry b2.aEntry | Via _ <- [a.aMem]]
      in [same : entry <> concat choice | choice <- mapM signs ns]
 
-  cases a b =
+  cases ms a b =
     let a1 = a
         b2 = onTwo b
         (varsA, varsB) = (variablesOf a, variablesOf b)
@@ -353,7 +356,7 @@ checkHazards caps uniformLocals k = nub [finding a b | ((a, _), (b, _)) <- pairs
         distinctOrSame (q, r, x) =
           distinct q <> distinct r <> [[equal x (rename onTwoVar x)]]
         facts = mapM distinctOrSame [t | t@(q, r, _) <- splits, Set.member q used || Set.member r used]
-        base0 = [(m <> concat f, c) | c <- [common a b], m <- meet a1 b2, f <- facts]
+        base0 = [(m <> concat f, c) | c <- [common a b], m <- ms, f <- facts]
         tripped = nub (tripsOf a <> tripsOf b)
         shared' launch =
           [ equal (term (VTrips One l)) (term (VTrips Two l))

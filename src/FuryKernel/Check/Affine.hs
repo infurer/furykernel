@@ -29,6 +29,7 @@ module FuryKernel.Check.Affine (
   equal,
   atMost,
   solvable,
+  splitBy,
 ) where
 
 import Control.Monad.Trans.State.Strict (State, evalState, get, put)
@@ -89,29 +90,56 @@ atMost a b = NonNegative (minus b a)
 data Row = Row (IntMap Integer) Integer
   deriving stock (Eq, Ord)
 
+-- | Each variable's least and greatest value, where the rows imply one.
+type Bounds = IntMap (Maybe Integer, Maybe Integer)
+
 {- | Whether the constraints may have a solution in the integers: 'False'
 only when they have none.
+
+The digit split takes its bounds from the constraints given, propagated
+once: they hold at every solution of the constraints, and those are what
+every system the search derives from them is looking for.
 -}
 solvable :: (Ord v) => [Constraint v] -> Bool
-solvable cs = evalState (equalities (Map.size numbering) [row a | EqualsZero a <- cs] ins) effort
+solvable cs = evalState (equalities (boundsOf eqs ins) next eqs ins) effort
  where
-  ins = [row a | NonNegative a <- cs]
+  (next, _, eqs, ins) = numbered cs
+
+-- | The constraints' variables numbered, their equalities and inequalities as rows.
+numbered :: (Ord v) => [Constraint v] -> (Int, Map v Int, [Row], [Row])
+numbered cs = (Map.size numbering, numbering, [row a | EqualsZero a <- cs], [row a | NonNegative a <- cs])
+ where
   numbering = Map.fromList (zip (Set.toList (Set.fromList (concatMap names cs))) [0 ..])
   names = \case
     EqualsZero a -> Map.keys (coefficients a)
     NonNegative a -> Map.keys (coefficients a)
   row (Affine a c) = Row (IntMap.fromList [(numbering Map.! v, k) | (v, k) <- Map.toList a]) c
 
+-- | What equalities and inequalities imply of each variable.
+boundsOf :: [Row] -> [Row] -> Bounds
+boundsOf eqs ins = propagate (ins <> concat [[r, scaleRow (-1) r] | r <- eqs])
+
+{- | The first constraints, their equalities split by their digits by the
+bounds that both sets imply: in a system that holds both sets, the split
+equalities have the integer solutions the first constraints' own have.
+-}
+splitBy :: (Ord v) => [Constraint v] -> [Constraint v] -> [Constraint v]
+splitBy cs context = [c | c@(NonNegative _) <- cs] <> map (EqualsZero . affine) (digits (boundsOf eqs ins) own)
+ where
+  (_, numbering, eqs, ins) = numbered (cs <> context)
+  own = take (length [() | EqualsZero _ <- cs]) eqs
+  names = IntMap.fromList [(i, v) | (v, i) <- Map.toList numbering]
+  affine (Row a c) = Affine (Map.fromList [(names IntMap.! i, k) | (i, k) <- IntMap.toList a]) c
+
 {- | Equalities split by their digits: where every coefficient of some
 terms is a multiple of @m@ and the rest of the row (its constant included)
-lies strictly between @-m@ and @m@ by the bounds the rows give, the rest
-is zero, and so are those terms. Applied over again to the parts, it takes
-a row-major index apart, row from column, digit by digit.
+lies strictly between @-m@ and @m@ by the bounds given, the rest is zero,
+and so are those terms. Applied over again to the parts, it takes a
+row-major index apart, row from column, digit by digit.
 -}
-digits :: [Row] -> [Row] -> [Row]
-digits ins eqs = concatMap split eqs
+digits :: Bounds -> [Row] -> [Row]
+digits known = concatMap split
  where
-  known = propagate (ins <> concat [[r, scaleRow (-1) r] | r <- eqs])
   split r@(Row a c) =
     case [ (Row high 0, Row low c)
          | m <- reverse (Set.toList (Set.fromList (map abs (IntMap.elems a))))
@@ -157,26 +185,26 @@ anyOf f = foldr (orElse . f) (pure False)
 {- | Eliminates the equalities one at a time, then hands the inequalities
 on; @next@ numbers a new variable.
 -}
-equalities :: Int -> [Row] -> [Row] -> Search Bool
-equalities next eqs ins
+equalities :: Bounds -> Int -> [Row] -> [Row] -> Search Bool
+equalities known next eqs ins
   | length ins > budget = pure True
   | otherwise = step $ case eqs of
-      [] -> inequalities next ins
+      [] -> inequalities known next ins
       e : rest
         | [_] <- split' -> one e rest
-        | otherwise -> equalities next (split' <> rest) ins
+        | otherwise -> equalities known next (split' <> rest) ins
        where
-        split' = digits (ins <> concat [[r, scaleRow (-1) r] | r <- rest]) [e]
+        split' = digits known [e]
  where
   one eq rest = case eq of
     Row a c
-      | IntMap.null a -> if c == 0 then equalities next rest ins else pure False
+      | IntMap.null a -> if c == 0 then equalities known next rest ins else pure False
       | c `mod` g /= 0 -> pure False
       | otherwise -> case [(x, k) | (x, k) <- IntMap.toList a', abs k == 1] of
           (x, k) : _ ->
             -- x = -k · (the rest of the row), k being ±1.
             let value = scaleRow (negate k) (Row (IntMap.delete x a') c')
-             in equalities next (map (substitute x value) rest) (map (substitute x value) ins)
+             in equalities known next (map (substitute x value) rest) (map (substitute x value) ins)
           [] ->
             -- Pugh's step: with m = |a_k| + 1 and a new variable σ, an
             -- equation the row implies gives x_k a coefficient of ±1;
@@ -187,7 +215,7 @@ equalities next eqs ins
                   scaleRow (signum k) $
                     Row (IntMap.insert next (negate m) (IntMap.map (`modHat` m) (IntMap.delete x a'))) (c' `modHat` m)
                 sub = substitute x value
-             in equalities (next + 1) (sub (Row a' c') : map sub rest) (map sub ins)
+             in equalities known (next + 1) (sub (Row a' c') : map sub rest) (map sub ins)
      where
       g = foldr gcd 0 (IntMap.elems a)
       a' = IntMap.map (`div` g) a
@@ -212,15 +240,15 @@ substitute x value r@(Row a c) = case IntMap.lookup x a of
 {- | Inequalities @row ≥ 0@: normalized, then a variable gone, until none
 is left.
 -}
-inequalities :: Int -> [Row] -> Search Bool
-inequalities next rows0
+inequalities :: Bounds -> Int -> [Row] -> Search Bool
+inequalities known next rows0
   | length rows0 > budget = pure True
   | otherwise = step $ case normalize rows0 of
       Nothing -> pure False
       Just (eqs, rows)
-        | not (null eqs) -> equalities next eqs rows
+        | not (null eqs) -> equalities known next eqs rows
         | null rows -> pure True
-        | otherwise -> eliminate next rows
+        | otherwise -> eliminate known next rows
 
 {- | Each row divided by the greatest common divisor of its coefficients,
 its constant rounded down, the rows without variables dropped, and of rows
@@ -256,12 +284,12 @@ an exact elimination that at most doubles the rows; trying each value of
 one with fewer than 16; and an elimination, exact or by the real and the
 dark shadows and the splinters between them.
 -}
-eliminate :: Int -> [Row] -> Search Bool
-eliminate next rows
+eliminate :: Bounds -> Int -> [Row] -> Search Bool
+eliminate known next rows
   | (y : _) <- [y | y <- vars, null (lowers y) || null (uppers y)] =
-      inequalities next [r | r <- rows, not (mentions y r)]
+      inequalities known next [r | r <- rows, not (mentions y r)]
   | (y : _) <- [y | y <- vars, exact y, growth y <= 0] = fourierMotzkin y
-  | any (\(lo, hi) -> maybe False (\l -> maybe False (< l) hi) lo) (IntMap.elems known) = pure False
+  | any (\(lo, hi) -> maybe False (\l -> maybe False (< l) hi) lo) (IntMap.elems here) = pure False
   | Just (y, values) <- smallest 2 = try y values
   | (y : _) <- [y | y <- vars, exact y, growth y <= length rows] = fourierMotzkin y
   | Just (y, values) <- smallest 16 = try y values
@@ -276,19 +304,20 @@ eliminate next rows
   uppers y = [r | r <- rows, coef y r < 0]
   exact y = all ((== 1) . coef y) (lowers y) || all ((== -1) . coef y) (uppers y)
   growth y = length (lowers y) * length (uppers y) - length (lowers y) - length (uppers y)
-  try y = anyOf (\v -> inequalities next (map (substitute y (Row IntMap.empty v)) rows))
+  try y = anyOf (\v -> inequalities known next (map (substitute y (Row IntMap.empty v)) rows))
   -- The variable with the fewest values that the rows allow, if they are
   -- fewer than @n@.
-  smallest n = case [(hi - lo, y, [lo .. hi]) | (y, (Just lo, Just hi)) <- IntMap.toList known, hi - lo < n] of
+  smallest n = case [(hi - lo, y, [lo .. hi]) | (y, (Just lo, Just hi)) <- IntMap.toList here, hi - lo < n] of
     [] -> Nothing
     cands -> let (_, y, vs) = minimumBy (comparing (\(w, _, _) -> w)) cands in Just (y, vs)
-  known = propagate rows
+  -- The bounds these rows imply, which can be tighter than the system's.
+  here = propagate rows
   fourierMotzkin x
-    | exact x = inequalities next (real <> others)
+    | exact x = inequalities known next (real <> others)
     | otherwise =
-        inequalities next (real <> others)
-          `andThen` ( inequalities next (dark <> others)
-                        `orElse` anyOf (\e -> equalities next [e] rows) splinters
+        inequalities known next (real <> others)
+          `andThen` ( inequalities known next (dark <> others)
+                        `orElse` anyOf (\e -> equalities known next [e] rows) splinters
                     )
    where
     others = [r | r <- rows, not (mentions x r)]
@@ -316,7 +345,7 @@ eliminate next rows
 few rounds of bounding each through the others: from @k·v + rest ≥ 0@,
 @k·v ≥ -max rest@.
 -}
-propagate :: [Row] -> IntMap (Maybe Integer, Maybe Integer)
+propagate :: [Row] -> Bounds
 propagate rows = iterate pass IntMap.empty !! 3
  where
   pass b = foldr (tightenWith b) b rows

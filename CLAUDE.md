@@ -168,8 +168,9 @@ nix fmt && git diff --exit-code &&
     accesses that could race is a system of affine constraints over both
     threads, their loops, the dimensions and their branches' conditions,
     solved in the integers (`FuryKernel.Check.Affine`, the Omega test, with
-    a row-major index taken apart digit by digit first); what the check
-    can't rule out is a finding. Where a uniform loop's passes hold
+    a row-major index taken apart digit by digit first: once for a pair,
+    by bounds propagated once for a system); what the check can't rule
+    out is a finding. Where a uniform loop's passes hold
     different numbers of barriers, a pair inside it is checked in one pass
     of it, where both threads see the same barriers, and in two, apart by
     at least the barriers between them. In such a pass, what both threads
