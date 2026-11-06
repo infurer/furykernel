@@ -287,7 +287,9 @@ nix fmt && git diff --exit-code &&
     their ranges), which runtimes' generators combine with their own
     types.
     The gate keeps launch sizes in u32 at every step, so their u64 agrees
-    with the interpreter's u32 for dimensions in their ranges.
+    with the interpreter's u32 for dimensions in their ranges. A launch
+    whose grid comes to 0 threadgroups does nothing, and runtimes skip it:
+    Metal refuses a dispatch of none.
   - `FuryKernel.Cpu`: the CPU target, `Cpu` with the portable kernels'
     limits, and its backend: checked kernels as Rust, in the interpreter's
     model (every local a vector with a lane per thread, each statement run
