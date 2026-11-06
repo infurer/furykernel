@@ -100,6 +100,9 @@ nix fmt && git diff --exit-code &&
     conversions that compute, and give zeros for subnormal results; an
     operation that returns an operand may return it unflushed. binary16
     keeps its subnormals, and so do the interpreter and the CPU target.
+    A conversion of a NaN gives a NaN whose sign, payload and quiet bit
+    are the target's (`EConvert`'s doc); the interpreter and the CPU
+    target quiet it and keep its sign and payload.
     Statements record the region the builder declared (uniform,
     SIMD-uniform, divergent); the gate verifies the declarations. Tables
     of device addresses, bound after the buffers, are read through, and
