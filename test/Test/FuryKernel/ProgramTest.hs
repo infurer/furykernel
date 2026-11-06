@@ -435,10 +435,10 @@ tests =
     , testCase "the gate places its findings: in the program, and in the node they are about" $
         [f.findingLocation | f <- fromLeft [] (checkProgram (withOp (\case RmsNorm _ g c v -> RmsNorm (1 / 0) g c v; op -> op) small {programName = "small_x_one"}))]
           @?= [Just (Location "small_x_one" []), Just (Location "small_x_one" ["n"])]
-    , testCase "the gate refuses caches but of bf16, weights but of a float type or without a layout, parameters that aren't finite, and names generated code can't carry" $ do
+    , testCase "the gate refuses weights but of a float type or without a layout, parameters that aren't finite, and names generated code can't carry, and takes caches of f16" $ do
         findings (withSource (\case SWeight sh _ l -> SWeight sh TU8 l; k -> k) small) @?= [Finding Shapes "The weight w holds u8, not bf16, f16 or f32."]
         findings (withSource (\case SWeight sh t _ -> SWeight sh t ""; k -> k) small) @?= [Finding Shapes "The weight w names no layout."]
-        findings (withSource (\case SCache l _ -> SCache l TU8; k -> k) (storedInto (Ring 1 1 4 2) 1 4)) @?= [Finding Shapes "The cache k holds u8, not bf16."]
+        findings (withSource (\case SCache l _ -> SCache l CacheF16; k -> k) (storedInto (Ring 1 1 4 2) 1 4)) @?= []
         findings (withOp (\case RmsNorm _ g c v -> RmsNorm (1 / 0) g c v; op -> op) small) @?= [Finding Shapes "n: its epsilon isn't positive and finite."]
         findings (withOp (\case RmsNorm e g _ v -> RmsNorm e g (0 / 0) v; op -> op) small) @?= [Finding Shapes "n: its factor isn't finite."]
         findings (withOp (\case Softcap _ v -> Softcap (1 / 0) v; op -> op) headProgram) @?= [Finding Shapes "capped: its cap isn't positive and finite."]
@@ -455,6 +455,7 @@ tests =
     , testCase "the evaluator: attention over one stored position returns its value" evalAttention
     , testCase "the evaluator, given what kernels stored: a rounding the bound allows kept, a further one refused" evalStored
     , testCase "the evaluator's bounds refuse a store of a well-conditioned value a step or two off, or truncated" boundsRefuse
+    , testCase "the evaluator rounds an f16 cache's stores to f16, and its bounds hold kernels' stores to f16's roundings" boundsF16
     , testCase "the evaluator's bounds take binary32's stores through cancellation, at subnormal ties and the overflow tie, and NaN" boundsAccept
     , testCase "the evaluator's bounds take a rotary embedding's binary32 stores far into the context, its angles products or from tables" boundsLongRope
     , testProperty "the evaluator's bounds take the stores of long binary32 dot products, summed in order or pairwise" boundsLongDots
@@ -1158,14 +1159,14 @@ evalMixed = do
 ------------------------------------------------------------------------------
 -- The evaluator's bounds
 
--- | A linear layer of one output over @k@ inputs, stored into a cache of one element.
-storedDot :: Natural -> Program
-storedDot k = program "stored_dot" $ do
+-- | A linear layer of one output over @k@ inputs, stored into a cache of one element of the given type.
+storedDotIn :: CacheElem -> Natural -> Program
+storedDotIn t k = program "stored_dot" $ do
   x <- input "x" (wholeRow k) TF32
   w <- weight "w" [1, k]
   pos <- rowInts "position" 1 1
   slot <- rowInts "slot" 1 1
-  c <- cache "c" (Ring 1 1 1 1)
+  c <- cacheOf t "c" (Ring 1 1 1 1)
   y <- linear "y" w 0 x
   kvStore "store" StoreAt {storeCache = c, storePositions = pos, storeSequences = slot} y
   output "y" y
@@ -1181,7 +1182,22 @@ dotBindings w x =
 
 -- | Whether the evaluator keeps a kernel's store of @k@ for the dot product of @w@ and @x@.
 keeps :: [Double] -> [Double] -> Double -> Bool
-keeps w x k = isRight (evaluateStored (Kept (Map.fromList [("c", slots 1 [k])]) Map.empty) (checked (storedDot (fromIntegral (length x)))) (dotBindings w x))
+keeps = keepsIn CacheBF16
+
+-- | 'keeps', for a cache of the given type.
+keepsIn :: CacheElem -> [Double] -> [Double] -> Double -> Bool
+keepsIn t w x k = isRight (evaluateStored (Kept (Map.fromList [("c", slots 1 [k])]) Map.empty) (checked (storedDotIn t (fromIntegral (length x)))) (dotBindings w x))
+
+boundsF16 :: IO ()
+boundsF16 = do
+  -- 0.1 is 0.0999755859375 in f16 and 0.10009765625 in bf16.
+  let tenth t = keepsIn t [1] [0.1]
+  assertBool "f16's 0.1 was refused in an f16 cache" (tenth CacheF16 0.0999755859375)
+  assertBool "bf16's 0.1 was kept in an f16 cache" (not (tenth CacheF16 0.10009765625))
+  assertBool "bf16's 0.1 was refused in a bf16 cache" (tenth CacheBF16 0.10009765625)
+  assertBool "f16's 0.1 was kept in a bf16 cache" (not (tenth CacheBF16 0.0999755859375))
+  fmap (Map.lookup "c" . (.evalCaches)) (evaluate (checked (storedDotIn CacheF16 1)) (dotBindings [1] [0.1]))
+    @?= Right (Just (Map.fromList [(0, [0.0999755859375])]))
 
 boundsRefuse :: IO ()
 boundsRefuse = do
