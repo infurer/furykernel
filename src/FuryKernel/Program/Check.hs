@@ -4,8 +4,8 @@
 {- | The program gate: sources, values and nodes of unique ids, increasing
 in program order, every value made by one node and every cache stored into
 by one; every operation's values and sources of the shapes and types it
-takes, rows and caches of at least one element in every dimension, caches
-of bf16 and weights of a float type, finite parameters, every value made
+takes, rows and caches of at least one element in every dimension,
+weights of a float type, finite parameters, every value made
 before it is read; every index below the size of what it indexes; and
 names that generated code can carry, the program's without the @_x_@ that
 joins it to its steps' names.
@@ -98,22 +98,17 @@ layouts p =
  where
   zeros fields = [what | (what, 0) <- fields]
 
-{- | Caches of bf16, the type the program's evaluation rounds their stores to
-("FuryKernel.Program.Eval"); weights and tables of a float type, each
-naming its layout.
+{- | Weights and tables of a float type, each naming its layout. A cache's
+element type is one the program's evaluation rounds its stores to
+("FuryKernel.Program.Eval") by construction ('CacheElem').
 -}
 elementTypes :: Program -> [Finding]
 elementTypes p =
-  [ Finding Shapes ("The cache " <> s.sourceName <> " holds " <> scalarTypeName t <> ", not bf16.")
+  [ Finding Shapes ("The " <> what <> " " <> s.sourceName <> " holds " <> scalarTypeName t <> ", not bf16, f16 or f32.")
   | s <- p.programSources
-  , SCache _ t <- [s.sourceKind]
-  , t /= TBF16
+  , Just (what, t, _) <- [weighted s.sourceKind]
+  , t `notElem` [TBF16, TF16, TF32]
   ]
-    <> [ Finding Shapes ("The " <> what <> " " <> s.sourceName <> " holds " <> scalarTypeName t <> ", not bf16, f16 or f32.")
-       | s <- p.programSources
-       , Just (what, t, _) <- [weighted s.sourceKind]
-       , t `notElem` [TBF16, TF16, TF32]
-       ]
     <> [ Finding Shapes ("The " <> what <> " " <> s.sourceName <> " names no layout.")
        | s <- p.programSources
        , Just (what, _, layout) <- [weighted s.sourceKind]

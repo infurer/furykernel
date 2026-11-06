@@ -27,6 +27,7 @@ module FuryKernel.Program.Build (
   rowsF32,
   table,
   cache,
+  cacheOf,
 
   -- * Operations
   linear,
@@ -186,7 +187,11 @@ table name n dims = addSource name (STable n dims TBF16 "out_in")
 
 -- | A bf16 KV cache.
 cache :: Name -> CacheLayout -> P Src
-cache name l = addSource name (SCache l TBF16)
+cache = cacheOf CacheBF16
+
+-- | A KV cache of the given element type.
+cacheOf :: CacheElem -> Name -> CacheLayout -> P Src
+cacheOf e name l = addSource name (SCache l e)
 
 ------------------------------------------------------------------------------
 -- Operations

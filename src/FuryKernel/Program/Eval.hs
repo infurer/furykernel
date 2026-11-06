@@ -6,10 +6,10 @@ exact as a double computes it, in the order of the program; and how far
 from that a program's kernels, computing in binary32, can be.
 
 Rounding happens only where a program stores into state of a narrower type:
-a KV cache of bf16 holds each stored element rounded to nearest, ties to
-even, directly from its exact value. Everything else stays a double, so a
-program's kernels are compared with what their arithmetic approximates, not
-with another approximation of it.
+a KV cache holds each stored element rounded to its element type (bf16 or
+f16), to nearest, ties to even, directly from its exact value. Everything
+else stays a double, so a program's kernels are compared with what their
+arithmetic approximates, not with another approximation of it.
 
 A step's rows store into caches and attend over them in row order, as if
 they ran one at a time: a row's attention reads what the rows up to it
@@ -29,9 +29,9 @@ Every element of every value carries a bound: how far from its exact value
 a kernel's binary32 value of it can be, derived through the program from
 the bounds of what it is computed from, for kernels whose arithmetic keeps
 to the contract below. A kernel's store into a cache is right iff it lies
-between the bf16 roundings of the exact value less and plus its bound, or
-both are NaN. Bounds are computed in f64 and widened by 2^-20 of
-themselves, for the f64 evaluation's own rounding.
+between the roundings to the cache's element type of the exact value less
+and plus its bound, or both are NaN. Bounds are computed in f64 and
+widened by 2^-20 of themselves, for the f64 evaluation's own rounding.
 
 What the bounds assume of the kernels:
 
@@ -110,6 +110,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word32, Word64)
 import FuryKernel.IR (Name)
+import FuryKernel.Numerics (narrowF16Double, widenF16)
 import FuryKernel.Program.Check (CheckedProgram, checkedProgram)
 import FuryKernel.Program.Graph
 import FuryKernel.Type (ScalarType (..))
@@ -408,8 +409,8 @@ evaluateWith kept checked b = do
         [boundsArr [dotA (zip wa column) | column <- transpose (chunks seg ar)] | (wa, ar) <- zip was as]
     (KvStore (StoreAt c pos slot) x, []) -> do
       src <- sourceOf c
-      layout <- case src.sourceKind of
-        SCache l _ -> Right l
+      (layout, held) <- case src.sourceKind of
+        SCache l t -> Right (l, t)
         _ -> Left (src.sourceName <> " is not a cache.")
       let name = src.sourceName
       when (Map.member name env.envStores) $
@@ -434,11 +435,11 @@ evaluateWith kept checked b = do
           (u, at) <- cacheIndex layout sq position h
           let element = elements ! (h * d + i)
           value <- case row' of
-            Nothing -> pure (ownRounding element)
+            Nothing -> pure (ownRounding held element)
             Just sr -> do
               let k = sr ! (h * d + i)
-              unless (mayStore element k) $
-                Left ("The kernels staged " <> showT k <> " for " <> name <> " at " <> elementText layout (u, at + i) <> ", where " <> allowed element <> ".")
+              unless (mayStore held element k) $
+                Left ("The kernels staged " <> showT k <> " for " <> name <> " at " <> elementText layout (u, at + i) <> ", where " <> allowed held element <> ".")
               pure (exactA k)
           pure (r, position, (u, at + i), element, value)
       checkWrites name layout cacheUnits [a | (_, _, a, _, _) <- own]
@@ -456,8 +457,8 @@ evaluateWith kept checked b = do
                 unless (k == v.aExact || isNaN k && isNaN v.aExact) $
                   Left ("The kernels left " <> showT k <> " in " <> name <> " at " <> elementText layout a <> ", not the " <> showT v.aExact <> " they staged for it.")
               Nothing ->
-                unless (mayStore element k) $
-                  Left ("The kernels stored " <> showT k <> " in " <> name <> " at " <> elementText layout a <> ", where " <> allowed element <> ".")
+                unless (mayStore held element k) $
+                  Left ("The kernels stored " <> showT k <> " in " <> name <> " at " <> elementText layout a <> ", where " <> allowed held element <> ".")
             pure (r, exactA k)
       let used = [(a, [(r, position, if fmap fst (Map.lookup a finals) == Just r then maybe v snd (Map.lookup a finals) else v)]) | (r, position, a, _, v) <- own]
       pure
@@ -913,42 +914,48 @@ attendBounds scores = map element
 widened :: Double -> Double
 widened e = e * (1 + 2 ^^ (-20 :: Int))
 
--- | The least and the greatest bf16 a kernel's value of the element rounds to.
-storable :: Approx -> (Double, Double)
-storable a = (roundBF16 (a.aExact - e), roundBF16 (a.aExact + e))
+-- | The least and the greatest value of the cache's type a kernel's value of the element rounds to.
+storable :: CacheElem -> Approx -> (Double, Double)
+storable t a = (roundTo t (a.aExact - e), roundTo t (a.aExact + e))
  where
   e = widened a.aBound
+
+-- | Rounds to the cache's element type, to nearest, ties to even, directly from the double.
+roundTo :: CacheElem -> Double -> Double
+roundTo = \case
+  CacheBF16 -> roundBF16
+  CacheF16 -> float2Double . widenF16 . narrowF16Double
 
 {- | Whether a kernel can have stored @k@ for the element: unbounded,
 anything; NaN where the exact value is; otherwise between the roundings
 of the exact value less and plus its bound.
 -}
-mayStore :: Approx -> Double -> Bool
-mayStore a k
+mayStore :: CacheElem -> Approx -> Double -> Bool
+mayStore t a k
   | isInfinite a.aBound = True
   | isNaN a.aExact = isNaN k
-  | otherwise = let (lo, hi) = storable a in lo <= k && k <= hi
+  | otherwise = let (lo, hi) = storable t a in lo <= k && k <= hi
 
 -- | What the element's bound allows a store of it.
-allowed :: Approx -> Text
-allowed a
+allowed :: CacheElem -> Approx -> Text
+allowed t a
   | isNaN a.aExact = "the exact value is NaN"
   | lo == hi = "the exact " <> showT a.aExact <> ", within " <> showT a.aBound <> ", rounds to " <> showT lo
   | otherwise = "the exact " <> showT a.aExact <> ", within " <> showT a.aBound <> ", rounds to between " <> showT lo <> " and " <> showT hi
  where
-  (lo, hi) = storable a
+  (lo, hi) = storable t a
 
 {- | The evaluator's rounding of the element, with how far from it a
 kernel's store can be.
 -}
-ownRounding :: Approx -> Approx
-ownRounding a
+ownRounding :: CacheElem -> Approx -> Approx
+ownRounding t a
   | isNaN a.aExact || lo == hi = Approx own 0
   | isInfinite a.aBound || isInfinite lo || isInfinite hi = Approx own (1 / 0)
   | otherwise = Approx own (max (hi - own) (own - lo))
  where
-  own = roundBF16 a.aExact
-  (lo, hi) = storable a
+  own = roundTo t a.aExact
+  (lo, hi) = storable t a
 
 boundsArr :: [Approx] -> Arr
 boundsArr = arr . map (.aBound)

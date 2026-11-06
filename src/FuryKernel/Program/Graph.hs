@@ -40,6 +40,8 @@ module FuryKernel.Program.Graph (
   CacheLayout (..),
   cacheKvHeads,
   cacheHeadDim,
+  CacheElem (..),
+  cacheStorage,
 
   -- * Values, nodes and operations
   ValueId (..),
@@ -73,7 +75,7 @@ import Data.List (find)
 import Data.Text (Text)
 import Data.Text qualified as T
 import FuryKernel.IR (Name)
-import FuryKernel.Type (ScalarType, scalarTypeName)
+import FuryKernel.Type (ScalarType (..), scalarTypeName)
 import GHC.Float (castDoubleToWord64)
 import Numeric (showHex)
 import Numeric.Natural (Natural)
@@ -125,8 +127,8 @@ data SourceKind
     type and layout. Kernels reach an entry through its address.
     -}
     STable Natural [Natural] ScalarType Text
-  | -- | A KV cache: state that steps write and read, of this element type, bf16.
-    SCache CacheLayout ScalarType
+  | -- | A KV cache: state that steps write and read, its elements of this type.
+    SCache CacheLayout CacheElem
   deriving stock (Eq, Show)
 
 {- | How a KV cache holds a sequence's keys or values: each position's heads
@@ -159,6 +161,23 @@ cacheHeadDim :: CacheLayout -> Natural
 cacheHeadDim = \case
   Ring _ _ _ d -> d
   Paged _ _ _ d -> d
+
+{- | The type a KV cache holds its elements as, the type its stores round
+to. A quantized form joins as a constructor that carries its scheme: its
+codes' type, the length of a block that shares a scale, the scales' type.
+-}
+data CacheElem
+  = -- | bfloat16.
+    CacheBF16
+  | -- | binary16.
+    CacheF16
+  deriving stock (Eq, Ord, Show)
+
+-- | The scalar type a cache stores its elements as.
+cacheStorage :: CacheElem -> ScalarType
+cacheStorage = \case
+  CacheBF16 -> TBF16
+  CacheF16 -> TF16
 
 ------------------------------------------------------------------------------
 -- Values, nodes and operations
@@ -321,7 +340,7 @@ data Op
     CombineRanks ValueId ValueId
   | {- | Stores each row's heads (segments) into the cache, at the row's
     position (a source) of its sequence (its slot, or its block table).
-    The value is rounded to bf16, the cache's element type.
+    The value is rounded to the cache's element type.
     -}
     KvStore (StoreAt SourceId) ValueId
   | {- | Attention of each row's queries (heads as segments) over its
@@ -437,7 +456,7 @@ renderProgram p =
     SRowInts n b -> "row_ints " <> showT n <> " below " <> showT b
     SWeight dims t layout -> "weight " <> dimsT dims <> " " <> scalarTypeName t <> " " <> layout
     STable n dims t layout -> "table " <> showT n <> " x " <> dimsT dims <> " " <> scalarTypeName t <> " " <> layout
-    SCache l t -> "cache " <> layoutT l <> " " <> scalarTypeName t
+    SCache l e -> "cache " <> layoutT l <> " " <> scalarTypeName (cacheStorage e)
   layoutT = \case
     Ring s h n d -> "ring slots " <> showT s <> " heads " <> showT h <> " length " <> showT n <> " dim " <> showT d
     Paged b n h d -> "paged blocks " <> showT b <> " size " <> showT n <> " heads " <> showT h <> " dim " <> showT d

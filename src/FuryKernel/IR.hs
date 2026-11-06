@@ -233,7 +233,10 @@ data Expr
   | {- | Conversion to the given type: widening exactly, narrowing to
     nearest with ties to even, integers to floats rounding to nearest. A
     narrowing may take a binary32 subnormal as a zero of its sign, as
-    'BinOp' has it; a widening keeps the bits.
+    'BinOp' has it; a widening keeps subnormals. A NaN converts to a NaN,
+    not an infinity, whose sign, payload and quiet bit are the target's.
+    The interpreter and the CPU target quiet it and keep its sign and its
+    payload, the top bits where it narrows ("FuryKernel.Numerics").
     -}
     EConvert ScalarType Expr
   | {- | An integer narrowed to a narrower integer type, i32 to i8 or u32 to

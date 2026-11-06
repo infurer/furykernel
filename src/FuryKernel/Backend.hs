@@ -81,6 +81,10 @@ data LoweredKernel = LoweredKernel
   , lkIrHash :: Word64
   , lkThreads :: Natural
   , lkGroups :: Expr
+  {- ^ Threadgroups in the grid, over the parameters. A launch whose grid
+  comes to 0 does nothing, and runtimes skip it: Metal refuses a dispatch
+  of no threadgroups.
+  -}
   , lkBindings :: [(Name, Natural)]
   -- ^ The binding index of every buffer, then every table, by name.
   , lkParamsBinding :: Maybe Natural
