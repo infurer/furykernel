@@ -54,6 +54,7 @@ module FuryKernel.Check (
   checkIR,
   nameProblem,
   reservedNames,
+  reservedKernelNames,
 ) where
 
 import Control.Applicative ((<|>))
@@ -146,11 +147,12 @@ forPlace v = "for " <> v
 
 {- | Words no name may be: C++ keywords, which every shading language
 inherits, the qualifiers, types, builtins and library functions of the
-Metal, CUDA and HIP languages, the words Metal refuses as identifiers, and
-the Rust keywords that cannot be raw identifiers (generated Rust escapes
-the others) and its prelude's variants. Generated code reserves names
-starting with @fk_@, in any case; no name may start with an underscore,
-which C++ reserves in places.
+Metal, CUDA and HIP languages, the words Metal refuses as identifiers,
+Metal's object-like macros ('metalMacros'), and the Rust keywords that
+cannot be raw identifiers (generated Rust escapes the others) and its
+prelude's variants. Generated code reserves names starting with @fk_@, in
+any case; no name may start with an underscore, which C++ reserves in
+places.
 -}
 reservedNames :: Set Text
 reservedNames =
@@ -171,11 +173,74 @@ reservedNames =
       , "max min select fma simd_sum simd_max simd_min local global"
       , "as_type ray_data object_data"
       , "self Self super crate None Some Ok Err"
+      , metalMacros
       ]
+
+{- | Metal's object-like macros, which take a name's place wherever it
+appears. These and 'reservedKernelNames' are what macOS 27.2's runtime
+compiler (GPUCompiler 32023) defines in the headers @newLibraryWithSource@
+reads: @<metal_stdlib>@, and @<metal_types>@, which the compiler includes
+into every translation unit.
+-}
+metalMacros :: Text
+metalMacros =
+  T.unwords
+    [ "BFLT_DECIMAL_DIG BFLT_DIG BFLT_EPSILON BFLT_MANT_DIG BFLT_MAX BFLT_MAX_10_EXP"
+    , "BFLT_MAX_EXP BFLT_MIN BFLT_MIN_10_EXP BFLT_MIN_EXP BFLT_RADIX CHAR_BIT CHAR_MAX"
+    , "CHAR_MIN DBL_DECIMAL_DIG DBL_DIG DBL_EPSILON DBL_MANT_DIG DBL_MAX DBL_MAX_10_EXP"
+    , "DBL_MAX_EXP DBL_MIN DBL_MIN_10_EXP DBL_MIN_EXP DBL_RADIX FLT_DECIMAL_DIG FLT_DIG"
+    , "FLT_EPSILON FLT_MANT_DIG FLT_MAX FLT_MAX_10_EXP FLT_MAX_EXP FLT_MIN FLT_MIN_10_EXP"
+    , "FLT_MIN_EXP FLT_RADIX FP_ILOGB0 FP_ILOGBNAN HALF_DECIMAL_DIG HALF_DIG HALF_EPSILON"
+    , "HALF_MANT_DIG HALF_MAX HALF_MAX_10_EXP HALF_MAX_EXP HALF_MIN HALF_MIN_10_EXP"
+    , "HALF_MIN_EXP HALF_RADIX HUGE_VAL HUGE_VALBF HUGE_VALF HUGE_VALH INFINITY INT_MAX"
+    , "INT_MIN LLONG_MAX LLONG_MIN LONG_MAX LONG_MIN MAXBFLOAT MAXDOUBLE MAXFLOAT MAXHALF"
+    , "METAL_ASM METAL_CONST METAL_CONSTEXPR_SINCE_MTL_400 METAL_CONSTEXPR_SINCE_MTL_410"
+    , "METAL_EXPLICIT METAL_FUNC METAL_IMPLICIT METAL_INTERNAL METAL_MAYBE_UNDEF"
+    , "METAL_NON_NULL_RETURN METAL_NOTHROW METAL_PURE M_1_PI M_1_PI_BF M_1_PI_F M_1_PI_H"
+    , "M_2_PI M_2_PI_BF M_2_PI_F M_2_PI_H M_2_SQRTPI M_2_SQRTPI_BF M_2_SQRTPI_F"
+    , "M_2_SQRTPI_H M_E M_E_BF M_E_F M_E_H M_LN10 M_LN10_BF M_LN10_F M_LN10_H M_LN2"
+    , "M_LN2_BF M_LN2_F M_LN2_H M_LOG10E M_LOG10E_BF M_LOG10E_F M_LOG10E_H M_LOG2E"
+    , "M_LOG2E_BF M_LOG2E_F M_LOG2E_H M_PI M_PI_2 M_PI_2_BF M_PI_2_F M_PI_2_H M_PI_4"
+    , "M_PI_4_BF M_PI_4_F M_PI_4_H M_PI_BF M_PI_F M_PI_H M_SQRT1_2 M_SQRT1_2_BF M_SQRT1_2_F"
+    , "M_SQRT1_2_H M_SQRT2 M_SQRT2_BF M_SQRT2_F M_SQRT2_H NAN SCHAR_MAX SCHAR_MIN SHRT_MAX"
+    , "SHRT_MIN UCHAR_MAX UINT_MAX ULLONG_MAX ULONG_MAX USHRT_MAX"
+    ]
+
+{- | Words a kernel's name may not be, though other names may: Metal's
+typedefs at global scope, where a kernel's function is declared, and its
+function-like macros, which expand only before a parenthesis, as a
+kernel's name stands in its declaration; from the headers 'metalMacros'
+names. Its vector typedefs, @simd_float4@, @simd_packed_half8@,
+@vector_uint16@ and the like, are reserved by their shape.
+-}
+reservedKernelNames :: Set Text
+reservedKernelNames =
+  Set.fromList . T.words $
+    T.unwords
+      [ "complex imaginary int8_t int16_t int32_t int64_t intptr_t llong quad uint8_t"
+      , "uint16_t uint32_t uint64_t uintptr_t ullong METAL_ALIGN METAL_ARG_UNIFORM"
+      , "METAL_CONST_ARG METAL_DEPRECATED METAL_ENABLE_IF METAL_OS_LOG_FORMAT"
+      , "METAL_RELAXED_ORDER METAL_UNAVAILABLE METAL_VALID_LEVEL_ARG METAL_VALID_LOD_ARG"
+      , "METAL_VALID_RENDER_TARGET METAL_ZERO_ARG assert is_function_constant_defined"
+      ]
+
+-- | simd_float4, simd_packed_half8, vector_uint16 and the like: Metal's vector typedefs at global scope.
+metalVectorTypedef :: Name -> Bool
+metalVectorTypedef name =
+  or
+    [ maybe False (`elem` ["2", "3", "4", "8", "16"]) (T.stripPrefix (prefix <> base) name)
+    | (prefix, bases) <- [("simd_", "bfloat" : common), ("simd_packed_", "bfloat" : common), ("vector_", common)]
+    , base <- bases
+    ]
+ where
+  common = ["bool", "char", "double", "float", "half", "int", "long", "quad", "short", "uchar", "uint", "ulong", "ushort"]
 
 checkNames :: IR.Kernel -> [Finding]
 checkNames k =
   [Finding Names m | Just m <- map nameProblem allNames]
+    <> [ Finding Names ("The kernel name " <> k.kernelName <> " is a type or a function-like macro in a target language.")
+       | k.kernelName `Set.member` reservedKernelNames || metalVectorTypedef k.kernelName
+       ]
     <> [ Finding Names ("The name " <> n <> " is declared " <> T.pack (show c) <> " times.")
        | (n, c) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | n <- allNames])
        , c > 1

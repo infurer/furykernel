@@ -350,6 +350,19 @@ tests =
     , testCase "names: the words Metal refuses as identifiers" $
         map (.findingMessage) (findings [SLet "as_type" TF32 (f32 0), SLet "ray_data" TF32 (f32 0), SLet "object_data" TF32 (f32 0)])
           @?= ["The name as_type is reserved in a target language.", "The name ray_data is reserved in a target language.", "The name object_data is reserved in a target language."]
+    , testCase "names: Metal's object-like macros, as any name" $
+        messages (base [SLet "NAN" TF32 (f32 0)]) {kernelName = "INFINITY", kernelBuffers = [Buffer "M_PI_F" ReadWrite TF32 16 (ELit (LU32 64)) False]}
+          @?= [ "The name INFINITY is reserved in a target language."
+              , "The name M_PI_F is reserved in a target language."
+              , "The name NAN is reserved in a target language."
+              ]
+    , testCase "names: Metal's typedefs and function-like macros, as a kernel's name only" $ do
+        let typeOrMacro = ["quad", "int32_t", "simd_float4", "simd_packed_bfloat8", "vector_uint16", "assert", "is_function_constant_defined"]
+        map (\n -> messages (base []) {kernelName = n}) typeOrMacro
+          @?= [["The kernel name " <> n <> " is a type or a function-like macro in a target language."] | n <- typeOrMacro]
+        findings [SLet n TF32 (f32 0) | n <- typeOrMacro] @?= []
+    , testCase "names: OpenCL's words, which Metal takes as names" $
+        findings [SLet "coherent" TF32 (f32 0), SLet "read_only" TF32 (f32 0), SLet "pipe" TF32 (f32 0)] @?= []
     , testCase "typing: an fma of three operands of one float type" $
         map
           (.findingMessage)
