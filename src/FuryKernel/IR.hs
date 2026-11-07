@@ -445,7 +445,8 @@ tgBytes :: TgArray -> Natural
 tgBytes a = (a.tgCount * fromIntegral (scalarSize a.tgType) + tgAlign a - 1) `div` tgAlign a * tgAlign a
 
 {- | A kernel's threadgroup layout: each array's offset in bytes, in the
-order they lie, and the total, which targets allocate. The arrays lie in
+order they lie, and the total, the most a target allocates (Metal drops
+the arrays a kernel doesn't use). The arrays lie in
 the order declared, the more aligned first, each taking 'tgBytes'; so each
 starts at a multiple of its alignment, and the total is the sum of what
 they take, in any order. The gate checks the total against the target's

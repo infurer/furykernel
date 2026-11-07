@@ -111,7 +111,8 @@ nix fmt && git diff --exit-code &&
     runtime keeps it.
     Threadgroup arrays lie in the kernel's layout (`tgLayout`): each aligned
     to 16 B, or its element size if larger, and taking its size rounded up
-    to that; targets allocate the total.
+    to that; a target allocates at most the total (Metal drops the arrays a
+    kernel doesn't use).
   - `FuryKernel.Build`: the typed surface. `Sig` declares the interface
     (dimensions, parameters, buffers with access and alignment, threads,
     grid), `Scope` the threadgroup memory, `K r` the body in region `r`.
@@ -293,7 +294,8 @@ nix fmt && git diff --exit-code &&
     The gate keeps launch sizes in u32 at every step, so their u64 agrees
     with the interpreter's u32 for dimensions in their ranges. A launch
     whose grid comes to 0 threadgroups does nothing, and runtimes skip it:
-    Metal refuses a dispatch of none.
+    Metal's API validation refuses a dispatch of none, which does nothing
+    without it.
   - `FuryKernel.Cpu`: the CPU target, `Cpu` with the portable kernels'
     limits, and its backend: checked kernels as Rust, in the interpreter's
     model (every local a vector with a lane per thread, each statement run
@@ -350,8 +352,9 @@ nix fmt && git diff --exit-code &&
     /, sqrt and fma correctly rounded, fused or not, sums and products
     in any order, subnormal operands and results perhaps zeros of their
     signs; exp and log within 4 ulp, tanh within 5, sin and cos within 4,
-    rsqrt within 2; RMSNorm, RoPE (its angle the binary32 product of the
-    position and the frequency), GELU, softcap, routes and attention in
+    rsqrt within 2 (MSL's precise functions keep these bounds); RMSNorm,
+    RoPE (its angle the binary32 product of the position and the
+    frequency), GELU, softcap, routes and attention in
     the forms `Eval.hs` states. A store is right iff it lies between the
     bf16 roundings of the exact value less and plus its bound; past a
     route or an arg-max the bounds leave undecided, and where a value can

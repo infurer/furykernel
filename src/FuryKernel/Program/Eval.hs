@@ -46,8 +46,13 @@ What the bounds assume of the kernels:
   factors in any order. Constants (an epsilon, a factor, a scale, GELU's)
   are rounded once to binary32.
 * exp and log are within 4 ulp, tanh within 5, sin and cos within 4,
-  rsqrt within 2: the Metal Shading Language's precise functions are
-  within these, by its specification's table of single-precision accuracy.
+  rsqrt within 2: bounds of this contract's own. The Metal Shading
+  Language's precise functions are within them by its specification's
+  table of their single-precision accuracy (MSL 4.1's Table 8.1), which
+  has exp, log, sin and cos within 4 ulp, tanh within 5 and rsqrt
+  correctly rounded; 2 ulp is rsqrt's bound under fast math (Table 8.2),
+  and precise::rsqrt of a value widened from f16 or bf16 in the kernel
+  isn't correctly rounded on an M3 Max.
 * RMSNorm takes the sum of squares times or over the width, plus epsilon,
   its rsqrt (or one over its square root), and each element's product with
   that, its gamma and the factor.
