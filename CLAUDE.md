@@ -189,10 +189,12 @@ nix fmt && git diff --exit-code &&
     ifs and loops around what it is about.
   - `FuryKernel.Check.Launch`: launch sizes over the dimensions' legal
     values, the multiples of each one's divisor in its range that a u32
-    holds. The gate refuses a dimension without any, and a grid, extent or
+    holds. The gate refuses a dimension without any, a grid, extent or
     table size that leaves u32 at some step or divides by zero for some of
-    them: interval arithmetic bounds each step over a box of legal values, a
-    box it leaves open is split in two down to single points, where it is
+    them, and a grid whose threads, threadgroups times threads, leave u32
+    (Metal runs such a launch wrapped, without an error): interval
+    arithmetic bounds each step over a box of legal values, a box it
+    leaves open is split in two down to single points, where it is
     exact, and a refusal names the values that break it (or the boxes, 4096
     of them, that could not settle it). The same search gives a grid's
     fewest threadgroups (`lowest`) and shows one size no larger than another

@@ -444,6 +444,11 @@ tests =
     , testCase "launch sizes: what the search leaves open is refused" $
         grid (DimRange 1 4294967232 1) ((dimN .+. lu 63) ./. lu 64 .*. lu 64 .-. dimN)
           @?= ["The grid size (n + 63) / 64 * 64 - n could not be shown to stay in u32, dividing by no 0, for every legal value of n: 4096 boxes of them leave it open."]
+    , testCase "launch sizes: the grid's threads in u32, where the grid itself is" $ do
+        grid (DimRange 1 67108863 1) dimN @?= []
+        grid (DimRange 1 67108864 1) dimN @?= ["The number of the grid's threads, n * 64, leaves u32 at n = 67108864: n * 64 is 4294967296."]
+        grid (DimRange 1 4294967295 64) ((dimN .+. lu 63) ./. lu 64) @?= []
+        grid (DimRange 1 4294967295 1) (dimN .*. lu 2) @?= ["The grid size n * 2 leaves u32 at n = 2147483648: n * 2 is 4294967296."]
     ]
 
 -- | A small, sound kernel around a body.
