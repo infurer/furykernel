@@ -236,6 +236,27 @@ tests =
     , testCase "fragments: an index the same in every lane of the SIMD group" $
         findings [SFragVar "f" TF32, SFragLoad "f" (FDevice "out") (u32 SimdLane) (lu 8) False]
           @?= [Finding Uniformity "The fragment f's index or stride differs across the lanes of a SIMD group."]
+    , testCase "fragments: rows at least 8 elements apart, for every legal value, as MSL's loads and stores take them" $ do
+        let strides r body =
+              [ f.findingMessage
+              | f <-
+                  checkIR
+                    (targetCaps @T32)
+                    (base (SFragVar "f" TF32 : body))
+                      { kernelParams = [Param "n" TU32 (Dim r)]
+                      , kernelTables = [Table "v" ReadWrite TF32 16 (lu 1) (lu 512) True False]
+                      , kernelTgArrays = [TgArray "t" TF32 512]
+                      , kernelBuffers = [Buffer "out" ReadWrite TF32 16 (lu 512) False]
+                      }
+              , f.findingRule == Fragments
+              ]
+            from0 = DimRange 0 64 8
+        strides from0 [SFragLoad "f" (FDevice "out") (lu 0) (lu 4) False] @?= ["The stride of the fragment load into f, 4, is below 8: it is 4."]
+        strides from0 [SFragLoad "f" (FDevice "out") (lu 0) dimN True] @?= ["The stride of the fragment load into f, n, is below 8 at n = 0: it is 0."]
+        strides from0 [SFragLoad "f" (FThreadgroup "t") (lu 0) (dimN .+. lu 8) False, SFragLoad "f" (FVia "v" (lu 0)) (lu 0) (dimN .+. lu 8) True] @?= []
+        strides (DimRange 8 64 8) [SFragLoad "f" (FVia "v" (lu 0)) (lu 0) (dimN .-. lu 4) False] @?= ["The stride of the fragment load into f, n - 4, is below 8 at n = 8: it is 4."]
+        strides (DimRange 8 64 8) [SFragStore (FThreadgroup "t") (lu 0) (dimN .-. lu 16) "f"] @?= ["The stride of the fragment store of f, n - 16, leaves u32 at n = 8: n - 16 is -8."]
+        strides from0 [SLet "s" TU32 (lu 8), SFragStore (FDevice "out") (lu 0) (EVar "s") "f"] @?= ["The stride of the fragment store of f, s, uses more than dimensions, u32 literals and + - * / %."]
     , testCase "fragments through a table: its entry the same in every lane of the SIMD group" $ do
         let via m = [f.findingMessage | f <- checkIR (targetCaps @T32) (base [SFragVar "f" TF32, m]) {kernelTables = [Table "t" ReadWrite TF32 16 (lu 4) (lu 64) True False]}, f.findingRule == Uniformity]
             differs = ["The fragment f's table entry differs across the lanes of a SIMD group."]

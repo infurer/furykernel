@@ -68,7 +68,10 @@ data Rule
     ids, tokens, slots, blocks and positions.
     -}
     Bounds
-  | -- | Fragment products only of the element types the target takes.
+  | {- | Fragment products only of the element types the target takes, and
+    fragments' rows at least 8 elements apart in memory, for every legal
+    value of the dimensions.
+    -}
     Fragments
   | -- | The kernel checked for the target it was built for.
     Target

@@ -15,6 +15,7 @@ import Data.Text qualified as T
 import Data.Word (Word32)
 import FuryKernel.Build
 import FuryKernel.Check (checkIR)
+import FuryKernel.Check.Hazard (checkHazards)
 import FuryKernel.Constraint (TgArrayOk)
 import FuryKernel.Finding (Finding (..), Rule (..))
 import FuryKernel.IR (DimRange (..), Name, Stmt (..))
@@ -55,8 +56,10 @@ tests =
     , testCase "two SIMD groups store fragments to one place" $ do
         refused fragmentsOfTwo ["Threads may race on the buffer c: the fragment stored to c at 0u in two threads can touch one element in two threads of the launch."]
         raced fragmentsOfTwo [] [("a", map VF32 [0 .. 127]), ("c", replicate 64 (VF32 0))] "c"
-    , testCase "a fragment stored over itself, its rows four apart" $ do
-        refused overlapping ["Threads may race on the buffer c: the fragment stored to c at 0u in two threads can touch one element in two threads of the launch."]
+    , testCase "a fragment stored over itself, its rows four apart: the gate refuses its stride first, the hazard check the race" $ do
+        [f.findingMessage | f <- checkIR (targetCaps @T32) (kernelIR overlapping)] @?= ["The stride of the fragment store of f, 4, is below 8: it is 4."]
+        [f.findingMessage | f <- checkHazards (targetCaps @T32) mempty (kernelIR overlapping)]
+          @?= ["Threads may race on the buffer c: the fragment stored to c at 0u in two threads can touch one element in two threads of the launch."]
         raced overlapping [] [("a", map VF32 [0 .. 63]), ("c", replicate 64 (VF32 0))] "c"
     , testCase "a barrier orders no device memory" $ do
         refused deviceAcross ["Threads may race on the buffer y: the store to y[@thread] and the load of y[(63u - @thread)] can touch one element in two threads of the launch."]

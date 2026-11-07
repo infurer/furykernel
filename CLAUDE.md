@@ -158,7 +158,9 @@ nix fmt && git diff --exit-code &&
     pass of every loop counted, as a reduction's result is; any other
     divergent), the regions of barriers, SIMD-group operations and
     fragments (whose indices and strides must be SIMD-uniform), the
-    resources, the packs, and fragments of types the target multiplies;
+    resources, the packs, fragments of types the target multiplies, and
+    fragments' rows at least 8 elements apart for every legal value of
+    the dimensions (MSL's `simdgroup_load` and `simdgroup_store`);
     then, on a kernel that passes all of those, the hazards
     (`FuryKernel.Check.Hazard`): no two threads touch one element of
     memory unordered while one of them stores to it. A barrier orders

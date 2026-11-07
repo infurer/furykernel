@@ -71,7 +71,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import FuryKernel.Build (Kernel, kernelCaps, kernelIR, kernelProblems)
 import FuryKernel.Check.Hazard (checkHazards)
-import FuryKernel.Check.Launch (checkLaunchSizes)
+import FuryKernel.Check.Launch (Failure (..), Verdict (..), breachText, checkLaunchSizes, effort, kernelBox, launchSize, noLarger, pointText, sizeText)
 import FuryKernel.Constraint (checkAlign, checkBuffers, checkPack, checkTgArrayOf, checkTgTotal, checkThreads)
 import FuryKernel.Finding (Finding (..), Location (..), Rule (..), locatedAt)
 import FuryKernel.IR hiding (Kernel (..))
@@ -889,7 +889,13 @@ blocks2 = \case
 
 {- | Fragments against the target: none on a target without them, and
 every product's inputs of an element type it takes (its accumulators are
-f32, which every target with fragments has).
+f32, which every target with fragments has). A fragment's rows lie at
+least 8 elements apart in memory, loaded or stored, plain or transposed,
+for every legal value of the dimensions: a row of MSL's @simdgroup_load@
+and @simdgroup_store@ is at least the matrix's 8 columns (MSL 4.1's
+Table 6.9, @elements_per_row@), and Metal's shader validation refuses a
+load whose rows lie closer. A stride is a launch size, and one below 8 is
+refused with the values that make it so.
 -}
 checkFragments :: TargetCaps -> IR.Kernel -> [Finding]
 checkFragments caps k
@@ -897,7 +903,7 @@ checkFragments caps k
       [ Finding Fragments (caps.capName <> " has no fragments, and the kernel declares " <> T.intercalate ", " declared <> ".")
       | not (null declared)
       ]
-  | otherwise = nub [locatedAt (Location k.kernelName (reverse place)) f | (place, s) <- placed, f <- product' s]
+  | otherwise = nub [locatedAt (Location k.kernelName (reverse place)) f | (place, s) <- placed, f <- product' s <> stride s]
  where
   placed = concatMap (flatten []) k.kernelBody
   statements = map snd placed
@@ -914,6 +920,21 @@ checkFragments caps k
       , t `notElem` caps.capFragments
       ]
     _ -> []
+  stride = \case
+    SFragLoad n _ _ st _ -> rows ("The stride of the fragment load into " <> n) st
+    SFragStore _ _ st n -> rows ("The stride of the fragment store of " <> n) st
+    _ -> []
+  dims = Set.fromList [p.paramName | p <- k.kernelParams, Dim _ <- [p.paramRole]]
+  rows what st = case (launchSize dims st, launchSize dims (ELit (LU32 8)), kernelBox k) of
+    (Nothing, _, _) -> [Finding Fragments (what <> ", " <> renderExpr st <> ", uses more than dimensions, u32 literals and + - * / %.")]
+    (Just s, Just eight, Just box) -> case noLarger box eight s of
+      Holds -> []
+      Breaks pt (Larger _ v) -> [Finding Fragments (what <> ", " <> sizeText s <> ", is below 8" <> at pt <> ": it is " <> T.pack (show v) <> ".")]
+      Breaks pt f -> [Finding Fragments (what <> ", " <> sizeText s <> "," <> breachText pt f)]
+      Open -> [Finding Fragments (what <> ", " <> sizeText s <> ", could not be shown to be at least 8 for every legal value of its dimensions: " <> T.pack (show effort) <> " boxes of them leave it open.")]
+    -- A dimension without legal values is the launch sizes' finding.
+    _ -> []
+  at pt = if Map.null pt then "" else " at " <> pointText pt
 
 ------------------------------------------------------------------------------
 -- Resources
