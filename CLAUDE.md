@@ -477,7 +477,13 @@ nix fmt && git diff --exit-code &&
 - GHC 9.12 (`haskell.packages.ghc912`, set once in `nix/package.nix`),
   GHC2024 and the warnings in `furykernel.cabal`'s `warnings` stanza;
   `-Werror` only in the Nix build, so work in progress still loads in ghci.
-  Modules have export lists.
+  Modules have export lists. `-Wmissing-home-modules` makes a module the
+  .cabal file doesn't list, which Hackage's source tarball would lack, an
+  error.
+- Every dependency has a lower and an upper bound by the PVP
+  (https://pvp.haskell.org/), below its next major version, stated once:
+  the test suite shares the library's bounds and states only its own
+  dependencies'. base stays below the next GHC's until that GHC is tested.
 - Nothing host-specific in the repository: no hostnames, absolute paths of
   anyone's machine, or names of private repositories and services. master
   is mirrored to a public GitHub repository in full.
