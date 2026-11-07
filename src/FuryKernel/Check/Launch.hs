@@ -10,12 +10,15 @@ entries and the extent of each entry) is an expression over the
 dimensions and u32 literals in @+ - * / %@, which the host computes before
 a launch.
 
-'checkLaunchSizes' refuses a dimension without legal values, and a launch
+'checkLaunchSizes' refuses a dimension without legal values, a launch
 size that, for some legal values of its dimensions, leaves u32 at some
-step or divides by zero. Interval arithmetic bounds every step over a box
-of legal values; a box it leaves open is split in two, and the halves in
-turn, until every part is settled or a single point, where intervals are
-exact. So a launch size is refused with the values that break it, or
+step or divides by zero, and a grid whose threads, its threadgroups times
+each one's threads, leave u32: on Metal a launch of 2^32 threads or more
+runs wrapped, without an error (a grid of 2^22 threadgroups of 1024
+threads runs none of them). Interval arithmetic bounds every step over a
+box of legal values; a box it leaves open is split in two, and the halves
+in turn, until every part is settled or a single point, where intervals
+are exact. So a launch size is refused with the values that break it, or
 because 'effort' boxes could not show that none do. A launch size the gate
 accepts has one value at every legal point, whether computed in u32,
 which wraps, in u64 or in the integers.
@@ -383,10 +386,10 @@ scale k = Map.filter (/= 0) . Map.map (* k)
 ------------------------------------------------------------------------------
 -- The gate's check
 
-{- | Every dimension's range with legal values, and every launch size in
-u32 at every step, dividing by no zero, for every legal value of its
-dimensions. A launch size of more than dimensions and u32 literals in
-@+ - * / %@ is the typing check's.
+{- | Every dimension's range with legal values, every launch size in u32
+at every step, dividing by no zero, and the grid's threads in u32, for
+every legal value of their dimensions. A launch size of more than
+dimensions and u32 literals in @+ - * / %@ is the typing check's.
 -}
 checkLaunchSizes :: IR.Kernel -> [Finding]
 checkLaunchSizes k =
@@ -400,6 +403,14 @@ checkLaunchSizes k =
        , Just s <- [launchSize (Set.fromList (map fst dims)) e]
        , all (`Map.member` box) (dimsOf s)
        , Just m <- [problem s (safety box s)]
+       ]
+    -- The grid's threads, where the grid itself passes.
+    <> [ Finding LaunchSizes ("The number of the grid's threads, " <> sizeText t <> "," <> m)
+       | Just g <- [launchSize (Set.fromList (map fst dims)) k.kernelGroups]
+       , all (`Map.member` box) (dimsOf g)
+       , safety box g == Holds
+       , let t = Op Times g (Lit (toInteger k.kernelThreads))
+       , Just m <- [problem t (safety box t)]
        ]
  where
   dims = [(p.paramName, r) | p <- k.kernelParams, Dim r <- [p.paramRole]]

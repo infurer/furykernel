@@ -152,11 +152,13 @@ errors.
 binary32 subnormals are a target's choice: a target may take a subnormal
 binary32 operand as a zero of its sign, in arithmetic, comparisons and
 conversions that compute, and may give a zero of the result's sign for a
-subnormal binary32 result. An operation that returns one of its operands
-('Min', 'Max', 'ESelect', a SIMD-group minimum or maximum) may return it
-unflushed, and of operands that compare equal as zeros, any one of them.
-Loads, stores and exact widenings keep the bits. binary16 has no such
-leave. The interpreter and the CPU target keep IEEE 754's subnormals.
+binary32 result tiny before rounding, one whose exact magnitude is below
+2^-126, even where it rounds to ±2^-126, the least normal. An operation
+that returns one of its operands ('Min', 'Max', 'ESelect', a SIMD-group
+minimum or maximum) may return it unflushed, and of operands that compare
+equal as zeros, any one of them. Loads, stores and exact widenings keep
+the bits. binary16 has no such leave. The interpreter and the CPU target
+keep IEEE 754's subnormals.
 -}
 data BinOp
   = Add
@@ -445,7 +447,8 @@ tgBytes :: TgArray -> Natural
 tgBytes a = (a.tgCount * fromIntegral (scalarSize a.tgType) + tgAlign a - 1) `div` tgAlign a * tgAlign a
 
 {- | A kernel's threadgroup layout: each array's offset in bytes, in the
-order they lie, and the total, which targets allocate. The arrays lie in
+order they lie, and the total, the most a target allocates (Metal drops
+the arrays a kernel doesn't use). The arrays lie in
 the order declared, the more aligned first, each taking 'tgBytes'; so each
 starts at a multiple of its alignment, and the total is the sum of what
 they take, in any order. The gate checks the total against the target's

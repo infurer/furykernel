@@ -41,9 +41,9 @@ data Rule
     Names
   | -- | Well-typed expressions and statements.
     Typing
-  | {- | Launch sizes: every dimension with legal values, and the grid and
-    the buffers' and tables' sizes in u32 at every step, dividing by no
-    zero, for every legal value of their dimensions.
+  | {- | Launch sizes: every dimension with legal values, and the grid, its
+    threads and the buffers' and tables' sizes in u32 at every step,
+    dividing by no zero, for every legal value of their dimensions.
     -}
     LaunchSizes
   | -- | Conditions and loop bounds as uniform as their constructs require.
@@ -68,7 +68,10 @@ data Rule
     ids, tokens, slots, blocks and positions.
     -}
     Bounds
-  | -- | Fragment products only of the element types the target takes.
+  | {- | Fragment products only of the element types the target takes, and
+    fragments' rows at least 8 elements apart in memory, for every legal
+    value of the dimensions.
+    -}
     Fragments
   | -- | The kernel checked for the target it was built for.
     Target

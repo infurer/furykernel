@@ -97,9 +97,11 @@ nix fmt && git diff --exit-code &&
     bound each target states.
     binary32 subnormals are a target's choice (`BinOp`'s doc): it may take
     them as zeros of their signs in arithmetic, comparisons and
-    conversions that compute, and give zeros for subnormal results; an
-    operation that returns an operand may return it unflushed. binary16
-    keeps its subnormals, and so do the interpreter and the CPU target.
+    conversions that compute, and give zeros for results tiny before
+    rounding (whose exact magnitude is below 2^-126, even where they round
+    to it); an operation that returns an operand may return it unflushed.
+    binary16 keeps its subnormals, and so do the interpreter and the CPU
+    target.
     A conversion of a NaN gives a NaN whose sign, payload and quiet bit
     are the target's (`EConvert`'s doc); the interpreter and the CPU
     target quiet it and keep its sign and payload.
@@ -111,7 +113,8 @@ nix fmt && git diff --exit-code &&
     runtime keeps it.
     Threadgroup arrays lie in the kernel's layout (`tgLayout`): each aligned
     to 16 B, or its element size if larger, and taking its size rounded up
-    to that; targets allocate the total.
+    to that; a target allocates at most the total (Metal drops the arrays a
+    kernel doesn't use).
   - `FuryKernel.Build`: the typed surface. `Sig` declares the interface
     (dimensions, parameters, buffers with access and alignment, threads,
     grid), `Scope` the threadgroup memory, `K r` the body in region `r`.
@@ -158,7 +161,9 @@ nix fmt && git diff --exit-code &&
     pass of every loop counted, as a reduction's result is; any other
     divergent), the regions of barriers, SIMD-group operations and
     fragments (whose indices and strides must be SIMD-uniform), the
-    resources, the packs, and fragments of types the target multiplies;
+    resources, the packs, fragments of types the target multiplies, and
+    fragments' rows at least 8 elements apart for every legal value of
+    the dimensions (MSL's `simdgroup_load` and `simdgroup_store`);
     then, on a kernel that passes all of those, the hazards
     (`FuryKernel.Check.Hazard`): no two threads touch one element of
     memory unordered while one of them stores to it. A barrier orders
@@ -187,10 +192,12 @@ nix fmt && git diff --exit-code &&
     ifs and loops around what it is about.
   - `FuryKernel.Check.Launch`: launch sizes over the dimensions' legal
     values, the multiples of each one's divisor in its range that a u32
-    holds. The gate refuses a dimension without any, and a grid, extent or
+    holds. The gate refuses a dimension without any, a grid, extent or
     table size that leaves u32 at some step or divides by zero for some of
-    them: interval arithmetic bounds each step over a box of legal values, a
-    box it leaves open is split in two down to single points, where it is
+    them, and a grid whose threads, threadgroups times threads, leave u32
+    (Metal runs such a launch wrapped, without an error): interval
+    arithmetic bounds each step over a box of legal values, a box it
+    leaves open is split in two down to single points, where it is
     exact, and a refusal names the values that break it (or the boxes, 4096
     of them, that could not settle it). The same search gives a grid's
     fewest threadgroups (`lowest`) and shows one size no larger than another
@@ -289,7 +296,8 @@ nix fmt && git diff --exit-code &&
     The gate keeps launch sizes in u32 at every step, so their u64 agrees
     with the interpreter's u32 for dimensions in their ranges. A launch
     whose grid comes to 0 threadgroups does nothing, and runtimes skip it:
-    Metal refuses a dispatch of none.
+    Metal's API validation refuses a dispatch of none, which does nothing
+    without it.
   - `FuryKernel.Cpu`: the CPU target, `Cpu` with the portable kernels'
     limits, and its backend: checked kernels as Rust, in the interpreter's
     model (every local a vector with a lane per thread, each statement run
@@ -344,9 +352,10 @@ nix fmt && git diff --exit-code &&
     binary32 value can be from it, derived through the program for
     kernels that keep to a contract: binary32 throughout, with +, −, ×,
     /, sqrt and fma correctly rounded, fused or not, sums and products
-    in any order, subnormal operands and results perhaps zeros of their
-    signs; exp and log within 4 ulp, tanh within 5, sin and cos within 4,
-    rsqrt within 2; RMSNorm, RoPE (its angle the binary32 product of the
+    in any order, subnormal operands and results tiny before rounding
+    perhaps zeros of their signs; exp and log within 4 ulp, tanh within 5,
+    sin and cos within 4, rsqrt within 2 (MSL's precise functions keep
+    these bounds); RMSNorm, RoPE (its angle the binary32 product of the
     position and the frequency), GELU, softcap, routes and attention in
     the forms `Eval.hs` states. A store is right iff it lies between the
     bf16 roundings of the exact value less and plus its bound; past a

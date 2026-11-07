@@ -82,8 +82,9 @@ data LoweredKernel = LoweredKernel
   , lkThreads :: Natural
   , lkGroups :: Expr
   {- ^ Threadgroups in the grid, over the parameters. A launch whose grid
-  comes to 0 does nothing, and runtimes skip it: Metal refuses a dispatch
-  of no threadgroups.
+  comes to 0 does nothing, and runtimes skip it: a dispatch of no
+  threadgroups is refused under Metal's API validation, and does nothing
+  without it.
   -}
   , lkBindings :: [(Name, Natural)]
   -- ^ The binding index of every buffer, then every table, by name.
@@ -94,7 +95,7 @@ data LoweredKernel = LoweredKernel
   -}
   , lkTgMemory :: Natural
   {- ^ Threadgroup memory, in bytes: the total of the kernel's layout
-  ('FuryKernel.IR.tgLayout'), each array aligned to 16 bytes at least,
-  which the target allocates.
+  ('FuryKernel.IR.tgLayout'), each array aligned to 16 bytes at least. A
+  target may allocate less: Metal drops the arrays a kernel doesn't use.
   -}
   }
