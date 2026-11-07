@@ -362,7 +362,13 @@ tests =
           @?= [["The kernel name " <> n <> " is a type or a function-like macro in a target language."] | n <- typeOrMacro]
         findings [SLet n TF32 (f32 0) | n <- typeOrMacro] @?= []
     , testCase "names: OpenCL's words, which Metal takes as names" $
-        findings [SLet "coherent" TF32 (f32 0), SLet "read_only" TF32 (f32 0), SLet "pipe" TF32 (f32 0)] @?= []
+        findings [SLet "read_only" TF32 (f32 0), SLet "pipe" TF32 (f32 0)] @?= []
+    , testCase "names: MSL 4.1's keywords, as any name" $
+        map (.findingMessage) (findings [SLet "coherent" TF32 (f32 0), SLet "addrspace_cast" TF32 (f32 0)])
+          @?= ["The name coherent is reserved in a target language.", "The name addrspace_cast is reserved in a target language."]
+    , testCase "names: the kernel names Metal refuses at MSL 4.1, which other names may be but its keywords" $ do
+        [n | n <- refusedAt41, null (messages (base []) {kernelName = n})] @?= []
+        findings [SLet n TF32 (f32 0) | n <- refusedAt41, n `notElem` ["coherent", "addrspace_cast"]] @?= []
     , testCase "typing: an fma of three operands of one float type" $
         map
           (.findingMessage)
@@ -494,3 +500,32 @@ lying = B.kernel "lying" $ do
 
 showT :: Int -> Text
 showT = T.pack . show
+
+{- | The kernel names that Metal refuses at MSL 4.1 and that the gate took
+before: a fuzz of 38,667 names in every role, GPUCompiler 32023 on macOS
+27.2. In every other role it refuses only @coherent@ and @addrspace_cast@.
+-}
+refusedAt41 :: [Text]
+refusedAt41 =
+  T.words $
+    T.unwords
+      [ "addrspace_cast bfloat16 bfloat8 bool16 bool8 char16 char8 coherent double16 double8"
+      , "float16 float8 half16 half8 int16 int8 llong16 llong2 llong3 llong4 llong8 long16"
+      , "long8 nullptr_t packed_bfloat16 packed_bfloat2 packed_bfloat3 packed_bfloat4"
+      , "packed_bfloat8 packed_bool16 packed_bool2 packed_bool3 packed_bool4 packed_bool8"
+      , "packed_char16 packed_char2 packed_char3 packed_char4 packed_char8 packed_double16"
+      , "packed_double2 packed_double3 packed_double4 packed_double8 packed_float16"
+      , "packed_float2 packed_float3 packed_float4 packed_float8 packed_half16 packed_half2"
+      , "packed_half3 packed_half4 packed_half8 packed_int16 packed_int2 packed_int3"
+      , "packed_int4 packed_int8 packed_llong16 packed_llong2 packed_llong3 packed_llong4"
+      , "packed_llong8 packed_long16 packed_long2 packed_long3 packed_long4 packed_long8"
+      , "packed_quad16 packed_quad2 packed_quad3 packed_quad4 packed_quad8 packed_short16"
+      , "packed_short2 packed_short3 packed_short4 packed_short8 packed_uchar16 packed_uchar2"
+      , "packed_uchar3 packed_uchar4 packed_uchar8 packed_uint16 packed_uint2 packed_uint3"
+      , "packed_uint4 packed_uint8 packed_ullong16 packed_ullong2 packed_ullong3"
+      , "packed_ullong4 packed_ullong8 packed_ulong16 packed_ulong2 packed_ulong3"
+      , "packed_ulong4 packed_ulong8 packed_ushort16 packed_ushort2 packed_ushort3"
+      , "packed_ushort4 packed_ushort8 quad16 quad2 quad3 quad4 quad8 short16 short8 simd"
+      , "uchar16 uchar8 uint16 uint8 ullong16 ullong2 ullong3 ullong4 ullong8 ulong16 ulong8"
+      , "ushort16 ushort8"
+      ]

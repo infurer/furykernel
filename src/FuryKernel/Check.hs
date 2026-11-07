@@ -147,8 +147,9 @@ forPlace v = "for " <> v
 
 {- | Words no name may be: C++ keywords, which every shading language
 inherits, the qualifiers, types, builtins and library functions of the
-Metal, CUDA and HIP languages, the words Metal refuses as identifiers,
-Metal's object-like macros ('metalMacros'), and the Rust keywords that
+Metal, CUDA and HIP languages, the words Metal refuses as identifiers
+(MSL 4.1's keywords @coherent@ and @addrspace_cast@ among them), Metal's
+object-like macros ('metalMacros'), and the Rust keywords that
 cannot be raw identifiers (generated Rust escapes the others) and its
 prelude's variants. Generated code reserves names starting with @fk_@, in
 any case; no name may start with an underscore, which C++ reserves in
@@ -171,7 +172,7 @@ reservedNames =
       , "thread visible stage_in half bfloat uint ushort uchar ulong size_t ptrdiff_t"
       , "metal main threadIdx blockIdx blockDim gridDim warpSize"
       , "max min select fma simd_sum simd_max simd_min local global"
-      , "as_type ray_data object_data"
+      , "as_type ray_data object_data coherent addrspace_cast"
       , "self Self super crate None Some Ok Err"
       , metalMacros
       ]
@@ -207,11 +208,11 @@ metalMacros =
     ]
 
 {- | Words a kernel's name may not be, though other names may: Metal's
-typedefs at global scope, where a kernel's function is declared, and its
-function-like macros, which expand only before a parenthesis, as a
-kernel's name stands in its declaration; from the headers 'metalMacros'
-names. Its vector typedefs, @simd_float4@, @simd_packed_half8@,
-@vector_uint16@ and the like, are reserved by their shape.
+typedefs and namespaces at global scope, where a kernel's function is
+declared, and its function-like macros, which expand only before a
+parenthesis, as a kernel's name stands in its declaration; from the
+headers 'metalMacros' names. Its vector typedefs are reserved by their
+shape ('metalVectorTypedef').
 -}
 reservedKernelNames :: Set Text
 reservedKernelNames =
@@ -222,18 +223,38 @@ reservedKernelNames =
       , "METAL_CONST_ARG METAL_DEPRECATED METAL_ENABLE_IF METAL_OS_LOG_FORMAT"
       , "METAL_RELAXED_ORDER METAL_UNAVAILABLE METAL_VALID_LEVEL_ARG METAL_VALID_LOD_ARG"
       , "METAL_VALID_RENDER_TARGET METAL_ZERO_ARG assert is_function_constant_defined"
+      , "nullptr_t simd"
       ]
 
--- | simd_float4, simd_packed_half8, vector_uint16 and the like: Metal's vector typedefs at global scope.
+{- | Metal's vector typedefs at global scope, which MSL 4.1 refuses as a
+kernel's name, of widths 2, 3, 4, 8 and 16: the @simd_@, @simd_packed_@
+and @vector_@ ones (@simd_float4@, @vector_uint16@), the @packed_@ ones
+of every base (@packed_half2@, @packed_llong8@), those of @llong@,
+@ullong@ and @quad@ (@quad4@), and those of widths 8 and 16 of the
+'vectorBases' (@float8@, @int16@), whose widths 2 to 4 no name may have.
+-}
 metalVectorTypedef :: Name -> Bool
 metalVectorTypedef name =
   or
-    [ maybe False (`elem` ["2", "3", "4", "8", "16"]) (T.stripPrefix (prefix <> base) name)
-    | (prefix, bases) <- [("simd_", "bfloat" : common), ("simd_packed_", "bfloat" : common), ("vector_", common)]
+    [ maybe False (`elem` widths) (T.stripPrefix (prefix <> base) name)
+    | (prefix, bases, widths) <-
+        [ ("simd_", "bfloat" : common, everyWidth)
+        , ("simd_packed_", "bfloat" : common, everyWidth)
+        , ("vector_", common, everyWidth)
+        , ("packed_", wide <> vectorBases, everyWidth)
+        , ("", wide, everyWidth)
+        , ("", vectorBases, ["8", "16"])
+        ]
     , base <- bases
     ]
  where
+  everyWidth = ["2", "3", "4", "8", "16"]
   common = ["bool", "char", "double", "float", "half", "int", "long", "quad", "short", "uchar", "uint", "ulong", "ushort"]
+  wide = ["llong", "ullong", "quad"]
+
+-- | The element types of Metal's vectors and matrices, @float4@, @half3x3@ and the like.
+vectorBases :: [Text]
+vectorBases = ["float", "half", "bfloat", "double", "int", "uint", "short", "ushort", "char", "uchar", "long", "ulong", "bool"]
 
 checkNames :: IR.Kernel -> [Finding]
 checkNames k =
@@ -283,10 +304,7 @@ nameProblem n
   identStart c = isAsciiLower c || isAsciiUpper c || c == '_'
   identChar c = identStart c || isDigit c
   -- float4, uint2, half3x3 and the like.
-  vectorType name =
-    any
-      (\base -> maybe False shape (T.stripPrefix base name))
-      ["float", "half", "bfloat", "double", "int", "uint", "short", "ushort", "char", "uchar", "long", "ulong", "bool"]
+  vectorType name = any (\base -> maybe False shape (T.stripPrefix base name)) vectorBases
   shape s = case T.unpack s of
     [a] -> a `elem` ("234" :: String)
     [a, 'x', b] -> a `elem` ("234" :: String) && b `elem` ("234" :: String)
