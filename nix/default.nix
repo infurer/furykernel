@@ -5,6 +5,7 @@
     ./checks.nix
     ./devshell.nix
     ./package.nix
+    ./release.nix
     ./rust.nix
     ./treefmt.nix
   ];

@@ -56,6 +56,36 @@ nix fmt && git diff --exit-code &&
   )
 ```
 
+### Releasing
+
+```sh
+nix run .#release -- 0.2.0.0-alpha.2   # Mika: a pre-release, Hackage's candidate of 0.2.0.0
+nix run .#release -- 0.2.0.0           # Mika: the release, promoting the newest pre-release
+nix run .#release -- --abort 0.2.1.0-alpha.1
+nix run .#publish-releases -- --check  # what a release of HEAD would upload
+nix build .#hackage                    # those tarballs: the source and the documentation
+```
+
+FuryKernel releases to Hackage, and its versions follow the PVP
+(https://pvp.haskell.org/): A.B grows when an export goes or changes,
+behaviour included, or an orphan instance comes or goes; C when exports
+are only added; D for the rest. Cabal versions are numbers only, so a
+pre-release, `<version>-alpha.N`, then beta.N and rc.N, goes to Hackage as
+the candidate of its version, a preview outside the index that the next
+pre-release replaces. The release itself promotes the newest pre-release:
+its tag goes on that pre-release's commit once the candidate holds its
+files, so Hackage's index gets what the candidate showed; a version that
+had no pre-release can't be released. The version changes only in a
+release commit, `<repo>: <version>`, made for a pre-release of a newer
+version; otherwise the tag goes on a commit master has, and the script
+starts a master pipeline for it. `nix run .#release` refuses a step smaller
+than the PVP needs from the last version on Hackage, by the declarations
+in their Hoogle listings; it can't see behaviour, which stays the
+releaser's call (`--skip-pvp-check` lets a listing that changed without
+the API through). Master's pipeline uploads, then pushes the tags to
+GitHub. The scripts are the same in the project's other Haskell
+repositories; they take the package from `packages.default`.
+
 ## Architecture
 
 - `flake.nix`: flake-parts on nixos-26.05, crane and rust-overlay for the
@@ -458,13 +488,27 @@ nix fmt && git diff --exit-code &&
   `-Werror`), `checks.nix` (the build with its tests, the no-compile tests,
   the CPU target's Rust against the interpreter and under clippy, hlint,
   cabal2nix-in-sync and `reuse lint`), `rust.nix` (crane and the Rust
-  toolchain for that check), `devshell.nix` (`checks.devshell` builds its shell) and `treefmt.nix` (`nix fmt`
-  and `checks.treefmt`).
+  toolchain for that check), `devshell.nix` (`checks.devshell` builds its shell), `treefmt.nix` (`nix fmt`
+  and `checks.treefmt`), and `release.nix`: `packages.hackage`, the
+  tarballs a release uploads (the source as `cabal sdist` packs it once
+  `cabal check` is clean, the package built and tested from it, and its
+  documentation by `haddock --for-hackage` with the Hoogle listing), the
+  `release` and `publish-releases` apps (`hackage.sh` before `release.sh`
+  and `publish-releases.sh`), and `checks.release`, which runs both
+  against throwaway repositories and keys, a fake nix and a fake Hackage
+  (`release-test.nix`).
 - `.gitlab-ci.yml`: GitLab CI on x86_64-linux runners. `checks` runs
   `nix flake check --all-systems`, which builds x86_64-linux's checks, and
   builds the packages of x86_64-linux and aarch64-linux, whose tests run in
-  their checkPhase; `publish-github`, on master once those passed, pushes
-  master, and the tags it holds, to the public GitHub repository.
+  their checkPhase; `publish-check` runs `nix run .#publish-releases -- --check`, the release job's script short of the upload, so that a
+  package that couldn't be released doesn't merge; `publish-github`, on
+  master once those passed, pushes master to the public GitHub repository;
+  `release` then releases the release tags merged into master
+  (`nix run .#publish-releases`): each must be signed with the release
+  signing key and name its commit's version, a pre-release goes to Hackage
+  as its version's candidate and a release to the index, each with its
+  documentation, and then the tags go to GitHub. Tags get no pipeline of
+  their own.
 
 ## Conventions
 
@@ -498,7 +542,8 @@ nix fmt && git diff --exit-code &&
   the AI assistant that helped, such as `Assisted-by: Claude Opus 5.5`,
   directly above the Signed-off-by. No other trailers.
 - `flake.lock` changes only together with the input change that needs them.
-- Every commit passes the per-commit gate (see Commands).
+- Every commit passes the per-commit gate (see Commands), but a release
+  commit, which changes only the version and `nix run .#release` checks.
 - Corrections to earlier commits go in as `git commit --fixup=<commit>` (or
   `--squash`) and are autosquashed before the merge request.
 - v0.2 work happens on `initialv02` and reaches master through merge
