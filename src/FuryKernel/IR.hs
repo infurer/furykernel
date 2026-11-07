@@ -152,11 +152,13 @@ errors.
 binary32 subnormals are a target's choice: a target may take a subnormal
 binary32 operand as a zero of its sign, in arithmetic, comparisons and
 conversions that compute, and may give a zero of the result's sign for a
-subnormal binary32 result. An operation that returns one of its operands
-('Min', 'Max', 'ESelect', a SIMD-group minimum or maximum) may return it
-unflushed, and of operands that compare equal as zeros, any one of them.
-Loads, stores and exact widenings keep the bits. binary16 has no such
-leave. The interpreter and the CPU target keep IEEE 754's subnormals.
+binary32 result tiny before rounding, one whose exact magnitude is below
+2^-126, even where it rounds to ±2^-126, the least normal. An operation
+that returns one of its operands ('Min', 'Max', 'ESelect', a SIMD-group
+minimum or maximum) may return it unflushed, and of operands that compare
+equal as zeros, any one of them. Loads, stores and exact widenings keep
+the bits. binary16 has no such leave. The interpreter and the CPU target
+keep IEEE 754's subnormals.
 -}
 data BinOp
   = Add

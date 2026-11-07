@@ -97,9 +97,11 @@ nix fmt && git diff --exit-code &&
     bound each target states.
     binary32 subnormals are a target's choice (`BinOp`'s doc): it may take
     them as zeros of their signs in arithmetic, comparisons and
-    conversions that compute, and give zeros for subnormal results; an
-    operation that returns an operand may return it unflushed. binary16
-    keeps its subnormals, and so do the interpreter and the CPU target.
+    conversions that compute, and give zeros for results tiny before
+    rounding (whose exact magnitude is below 2^-126, even where they round
+    to it); an operation that returns an operand may return it unflushed.
+    binary16 keeps its subnormals, and so do the interpreter and the CPU
+    target.
     A conversion of a NaN gives a NaN whose sign, payload and quiet bit
     are the target's (`EConvert`'s doc); the interpreter and the CPU
     target quiet it and keep its sign and payload.
@@ -350,11 +352,11 @@ nix fmt && git diff --exit-code &&
     binary32 value can be from it, derived through the program for
     kernels that keep to a contract: binary32 throughout, with +, −, ×,
     /, sqrt and fma correctly rounded, fused or not, sums and products
-    in any order, subnormal operands and results perhaps zeros of their
-    signs; exp and log within 4 ulp, tanh within 5, sin and cos within 4,
-    rsqrt within 2 (MSL's precise functions keep these bounds); RMSNorm,
-    RoPE (its angle the binary32 product of the position and the
-    frequency), GELU, softcap, routes and attention in
+    in any order, subnormal operands and results tiny before rounding
+    perhaps zeros of their signs; exp and log within 4 ulp, tanh within 5,
+    sin and cos within 4, rsqrt within 2 (MSL's precise functions keep
+    these bounds); RMSNorm, RoPE (its angle the binary32 product of the
+    position and the frequency), GELU, softcap, routes and attention in
     the forms `Eval.hs` states. A store is right iff it lies between the
     bf16 roundings of the exact value less and plus its bound; past a
     route or an arg-max the bounds leave undecided, and where a value can

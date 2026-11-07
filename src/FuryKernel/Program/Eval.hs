@@ -39,8 +39,8 @@ What the bounds assume of the kernels:
   weights, tables and caches as bound, and compute in binary32. Addition,
   subtraction, multiplication, division, square root and fused
   multiply-add are correctly rounded, but a subnormal operand may be
-  taken as a zero of its sign and a subnormal result given as one, as
-  'FuryKernel.IR.BinOp' allows.
+  taken as a zero of its sign and a result tiny before rounding given as
+  one, as 'FuryKernel.IR.BinOp' allows.
 * They add a sum's terms and a dot product's products in any order and
   association, fusing multiply-adds or not, and multiply a product's
   factors in any order. Constants (an epsilon, a factor, a scale, GELU's)
@@ -721,7 +721,8 @@ mag a = abs a.aExact + a.aBound
 
 {- | A bound made safe: unbounded if not a number, or if a kernel's value
 can overflow binary32; at least the value's magnitude if a kernel can flush
-it to zero.
+it to zero, as one whose exact magnitude may be below 2^-126 is, tiny
+before rounding even where it rounds to 2^-126.
 -}
 settle :: Approx -> Approx
 settle a@(Approx x e)
