@@ -85,6 +85,8 @@ releaser's call (`--skip-pvp-check` lets a listing that changed without
 the API through). Master's pipeline uploads, then pushes the tags to
 GitHub. The scripts are the same in the project's other Haskell
 repositories; they take the package from `packages.default`.
+`CHANGELOG.md` is the change log Hackage shows on the package's page, a
+section per version; 0.2.0.0 is the initial release.
 
 ## Architecture
 

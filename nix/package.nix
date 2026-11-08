@@ -24,6 +24,7 @@
       root = ../.;
       fileset = lib.fileset.unions [
         ../LICENSES
+        ../CHANGELOG.md
         ../README.md
         ../furykernel.cabal
         ../src
