@@ -20,6 +20,14 @@
 
 hackage_url=${HACKAGE_URL:-https://hackage.haskell.org}
 
+# The URL of Hackage's path $1 for a read, with a query of its own that no
+# cache in front of Hackage has seen: Hackage's CDN serves pages of
+# documentation and tarballs of candidates from its cache for hours, after
+# they changed too.
+fresh_url() {
+  echo "$hackage_url/$1?fresh=$(date +%s%N)"
+}
+
 # VERSION $1's parts, "BASE STAGE N", with "release 0" for BASE itself; fails
 # if $1 is no version.
 parse_version() {
@@ -107,7 +115,7 @@ cabal_field() {
 # The versions of package $1 on Hackage's index, one per line.
 index_versions() {
   local status
-  if ! status=$(curl -sS -L -o "$work/versions.json" -w '%{http_code}' -H 'Accept: application/json' "$hackage_url/package/$1"); then
+  if ! status=$(curl -sS -L -o "$work/versions.json" -w '%{http_code}' -H 'Accept: application/json' "$(fresh_url "package/$1")"); then
     echo "$prog: Hackage didn't answer for $1" >&2
     exit 1
   fi
@@ -125,7 +133,7 @@ index_versions() {
 # 404, and anything else an error.
 on_hackage() {
   local status
-  if ! status=$(curl -sS -L -o /dev/null -w '%{http_code}' "$hackage_url/$1"); then
+  if ! status=$(curl -sS -L -o /dev/null -w '%{http_code}' "$(fresh_url "$1")"); then
     echo "$prog: Hackage didn't answer for /$1" >&2
     exit 1
   fi
@@ -147,7 +155,7 @@ candidate_is() {
   local pkgid=$1 commit=$2 status file
   rm -rf "$work/candidate"
   mkdir "$work/candidate"
-  if ! status=$(curl -sS -L -o "$work/candidate.tar.gz" -w '%{http_code}' "$hackage_url/package/$pkgid/candidate/$pkgid.tar.gz"); then
+  if ! status=$(curl -sS -L -o "$work/candidate.tar.gz" -w '%{http_code}' "$(fresh_url "package/$pkgid/candidate/$pkgid.tar.gz")"); then
     echo "$prog: Hackage didn't answer for the candidate of $pkgid" >&2
     exit 1
   fi
@@ -219,9 +227,11 @@ upload_docs() {
   hackage_send "$path" -X PUT -H 'Content-Type: application/x-tar' -H 'Content-Encoding: gzip' --data-binary "@$1"
 }
 
-# Deletes the candidate of package version $1.
+# Deletes the candidate of package version $1, if Hackage still has it.
 delete_candidate() {
-  hackage_send "package/$1/candidate" -X DELETE
+  if on_hackage "package/$1/candidate"; then
+    hackage_send "package/$1/candidate" -X DELETE
+  fi
 }
 
 # The tarballs that tree $1's packages.hackage builds, with the caller's nix:

@@ -41,8 +41,8 @@
     candidates = {}
 
 
-    def log(line):
-        with open(os.path.join(state, "log"), "a") as f:
+    def log(line, name="log"):
+        with open(os.path.join(state, name), "a") as f:
             f.write(line + "\n")
 
 
@@ -62,24 +62,29 @@
             self.wfile.write(body)
 
         def do_GET(self):
-            m = re.fullmatch(r"/package/([a-z-]+)", self.path)
+            # Hackage's CDN would answer a read without a query of its own
+            # from its cache, maybe stale.
+            path, _, query = self.path.partition("?")
+            if not query.startswith("fresh="):
+                log("GET " + path, "cached")
+            m = re.fullmatch(r"/package/([a-z-]+)", path)
             if m and self.headers.get("Accept") == "application/json":
                 if not index:
                     return self.answer(404)
                 body = json.dumps({v: "normal" for v in index}).encode()
                 return self.answer(200, body, "application/json")
-            m = re.fullmatch(r"/package/(.+)/docs/", self.path)
+            m = re.fullmatch(r"/package/(.+)/docs/", path)
             if m:
                 return self.answer(200 if m.group(1) in docs else 404)
-            m = re.fullmatch(r"/package/(.+)/docs/(.+[.]txt)", self.path)
+            m = re.fullmatch(r"/package/(.+)/docs/(.+[.]txt)", path)
             if m and m.group(1) in docs:
                 with tarfile.open(fileobj=io.BytesIO(docs[m.group(1)])) as t:
                     member = t.extractfile(m.group(1) + "-docs/" + m.group(2))
                     return self.answer(200, member.read())
-            m = re.fullmatch(r"/package/(.+)/candidate", self.path)
+            m = re.fullmatch(r"/package/(.+)/candidate", path)
             if m:
                 return self.answer(200 if m.group(1) in candidates else 404)
-            m = re.fullmatch(r"/package/(.+)/candidate/(.+)[.]tar[.]gz", self.path)
+            m = re.fullmatch(r"/package/(.+)/candidate/(.+)[.]tar[.]gz", path)
             if m and m.group(1) == m.group(2) and m.group(1) in candidates:
                 return self.answer(200, candidates[m.group(1)], "application/x-gzip")
             self.answer(404)
@@ -87,7 +92,7 @@
         def payload(self):
             data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             if self.headers.get("Authorization") != token:
-                log(self.command + " " + self.path + " unauthorized")
+                log(self.command + " " + path + " unauthorized")
                 self.answer(401)
                 return None
             return data
@@ -489,6 +494,11 @@ in
 
     if grep -F unauthorized "$TMPDIR/hackage/log"; then
       echo "a write reached Hackage without the token" >&2
+      exit 1
+    fi
+    if [ -e "$TMPDIR/hackage/cached" ]; then
+      cat "$TMPDIR/hackage/cached"
+      echo "these reads could have been answered from a cache" >&2
       exit 1
     fi
     touch $out

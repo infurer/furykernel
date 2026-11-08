@@ -261,7 +261,7 @@ previous=$({
 if [ "$stage" != release ] && [ -n "$previous" ]; then
   tarballs "$tree"
   status=
-  if ! status=$(curl -sS -L -o "$work/previous.txt" -w '%{http_code}' "$hackage_url/package/$name-$previous/docs/$name.txt") || [ "$status" != 200 ]; then
+  if ! status=$(curl -sS -L -o "$work/previous.txt" -w '%{http_code}' "$(fresh_url "package/$name-$previous/docs/$name.txt")") || [ "$status" != 200 ]; then
     echo "release: no Hoogle listing of $name $previous on Hackage (${status:-no answer})" >&2
     exit 1
   fi
