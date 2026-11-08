@@ -145,7 +145,9 @@
             else:
                 return self.answer(404)
             log("PUT " + self.path)
-            self.answer(204)
+            # As Hackage answers: a page on one line, with no newline at its end.
+            page = "<html><body>Successfully uploaded documentation for " + pkgid + "!</body></html>"
+            self.answer(200, page.encode(), "text/html")
 
         def do_DELETE(self):
             if self.payload() is None:
@@ -257,6 +259,14 @@ in
         exit 1
       fi
     }
+    # shows_line LINE: the last command's output has LINE, a whole line.
+    shows_line() {
+      if ! grep -Fqx -- "$1" out; then
+        cat out
+        echo "expected the output to show the line: $1" >&2
+        exit 1
+      fi
+    }
     # logged COUNT LINE: Hackage logged LINE COUNT times.
     logged() {
       if [ "$(grep -Fxc -- "$2" "$TMPDIR/hackage/log")" != "$1" ]; then
@@ -344,7 +354,8 @@ in
 
     # Master's pipeline makes it the candidate, then pushes its tag.
     expect 0 publish-releases
-    shows "uploaded v0.2.0.0-alpha.1 to Hackage as the candidate of demo-0.2.0.0"
+    shows_line "  hackage: Successfully uploaded documentation for demo-0.2.0.0!"
+    shows_line "publish-releases: uploaded v0.2.0.0-alpha.1 to Hackage as the candidate of demo-0.2.0.0"
     logged 1 "POST /packages/candidates/ demo-0.2.0.0"
     logged 1 "PUT /package/demo-0.2.0.0/candidate/docs"
     on_github v0.2.0.0-alpha.1

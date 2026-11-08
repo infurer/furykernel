@@ -174,8 +174,10 @@ candidate_is() {
 
 # Sends a request with HACKAGE_TOKEN to Hackage's path $1, curl's arguments
 # after it, and shows Hackage's answer, which must be a success: 2xx, or
-# 303, Hackage's redirect after it did what it was asked. The token reaches
-# curl in a file, never on a command line.
+# 303, Hackage's redirect after it did what it was asked. The answer shows
+# without its HTML tags, each of its lines ended, the last too, which a page
+# on one line doesn't end. The token reaches curl in a file, never on a
+# command line.
 hackage_send() {
   local path=$1 status
   shift
@@ -187,7 +189,7 @@ hackage_send() {
     echo "$prog: Hackage didn't answer for /$path" >&2
     exit 1
   fi
-  sed -e 's/<[^>]*>//g' -e '/^[[:space:]]*$/d' -e 's/^/  hackage: /' "$work/answer"
+  awk '{ gsub(/<[^>]*>/, "") } !/^[[:space:]]*$/ { print "  hackage: " $0 }' "$work/answer"
   case "$status" in
   2?? | 303) ;;
   *)
