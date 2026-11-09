@@ -623,7 +623,8 @@ unitAt :: Units -> Element -> Maybe Double
 unitAt units (u, i) = do
   a <- Map.lookup u units
   let (lo, hi) = bounds a
-  if i >= lo && i <= hi then Just (a ! i) else Nothing
+  -- Read at once: a read left for later holds the whole slot or block.
+  if i >= lo && i <= hi then Just $! a ! i else Nothing
 
 -- | Stores into bound slots or blocks.
 writeUnits :: Units -> [(Element, Double)] -> Units

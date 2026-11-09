@@ -681,10 +681,14 @@ touchIn env grp device name marks ix who store what =
       -- A load before the last barrier is ordered before any touch to
       -- come, one superseded by a later one of the same thread is no
       -- longer needed, and on device memory one other thread's suffices.
+      -- The loads are stored evaluated, or each would keep the list
+      -- before it, and every load of the element since its last store.
       lift . writeArray arr (fromIntegral ix) $!
         if store
           then Marks (Just now) []
-          else Marks lastStore (now : (if device then take 1 else id) [l | l <- loads, l.markEpoch >= epoch, not (same l.markWho who)])
+          else
+            let kept = now : (if device then take 1 else id) [l | l <- loads, l.markEpoch >= epoch, not (same l.markWho who)]
+             in foldr seq () kept `seq` Marks lastStore kept
  where
   w = fromIntegral env.envCaps.capSimdWidth
   simdOf = \case
